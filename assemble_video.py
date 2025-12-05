@@ -1,51 +1,60 @@
 import subprocess
 import os
 
-# ================= CẤU HÌNH =================
-FRAMES_DIR = "workspace/frames_done"     # Ảnh đầu vào (đã dịch)
-ORIGINAL_VIDEO = "video/Impower.mp4"     # Video gốc (để lấy tiếng)
-OUTPUT_VIDEO = "video/Final_Translated.mp4"
-FPS = 30                                 # Phải khớp với Phần 1
+FRAMES_ROOT = "./frames_done"   # Nhiều thư mục con
+VIDEO_ROOT = "./data"                   # Nơi lưu video gốc
+OUTPUT_ROOT = "./video_output"           # Video xuất ra
+FPS = 30
 
-def assemble_video():
-    if not os.path.exists(FRAMES_DIR):
-        print("❌ Không tìm thấy thư mục ảnh đã dịch!")
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+def assemble_video_for_folder(subdir):
+    frames_dir = os.path.join(FRAMES_ROOT, subdir)
+    video_source = os.path.join(VIDEO_ROOT, f"{subdir}.mp4")
+    output_video = os.path.join(OUTPUT_ROOT, f"{subdir}_translated.mp4")
+
+    if not os.path.exists(video_source):
+        print(f"⚠️  Không tìm thấy video gốc: {video_source}")
         return
 
-    print("🎬 Đang ghép video bằng FFmpeg...")
+    if not os.path.exists(frames_dir):
+        print(f"⚠️  Không có thư mục frames: {frames_dir}")
+        return
 
-    # Cấu trúc lệnh FFmpeg:
-    # -framerate: Tốc độ đọc ảnh
-    # -i frames: Đầu vào ảnh
-    # -i video: Đầu vào video gốc (lấy audio)
-    # -map 0:v: Lấy hình từ input 0 (ảnh)
-    # -map 1:a: Lấy tiếng từ input 1 (video gốc)
-    # -c:a copy: Copy âm thanh gốc không cần nén lại (giữ nguyên chất lượng)
-    # -pix_fmt yuv420p: Để tương thích mọi trình phát
-    
+    print(f"🎬 Ghép video: {subdir}")
+
     cmd = [
-        'ffmpeg', '-y',                  # Overwrite nếu file tồn tại
+        'ffmpeg', '-y',
         '-framerate', str(FPS),
-        '-i', f'{FRAMES_DIR}/frame_%06d.jpg',
-        '-i', ORIGINAL_VIDEO,
+        '-i', f'{frames_dir}/frame_%06d.jpg',
+        '-i', video_source,
         '-c:v', 'libx264',
         '-preset', 'medium',
-        '-crf', '23',                    # Chất lượng nén (thấp hơn là nét hơn)
+        '-crf', '23',
         '-pix_fmt', 'yuv420p',
         '-map', '0:v',
         '-map', '1:a',
         '-c:a', 'copy',
-        '-shortest',                     # Kết thúc khi luồng ngắn nhất (ảnh) hết
-        OUTPUT_VIDEO
+        '-shortest',
+        output_video
     ]
-    
-    # Chạy lệnh (ẩn bớt log rác)
+
     subprocess.run(cmd)
-    
-    if os.path.exists(OUTPUT_VIDEO):
-        print(f"\n🎉 XONG! Video của bạn tại: {OUTPUT_VIDEO}")
+
+    if os.path.exists(output_video):
+        print(f"   ✔ Done: {output_video}")
     else:
-        print("\n❌ Có lỗi xảy ra, không thấy file output.")
+        print(f"   ❌ Lỗi khi tạo video {subdir}")
+
+def main():
+    subdirs = [d for d in os.listdir(FRAMES_ROOT) if os.path.isdir(os.path.join(FRAMES_ROOT, d))]
+    
+    print(f"🔍 Tìm thấy {len(subdirs)} video cần ghép")
+
+    for subdir in subdirs:
+        assemble_video_for_folder(subdir)
+
+    print("\n🎉 Hoàn tất ghép tất cả video!")
 
 if __name__ == "__main__":
-    assemble_video()
+    main()

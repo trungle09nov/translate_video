@@ -1,32 +1,66 @@
 import os
 import subprocess
 import shutil
+import json
 
-# ================= CẤU HÌNH =================
-VIDEO_INPUT = "video/Impower.mp4"       # File video gốc
-OUTPUT_FOLDER = "workspace/frames_raw"  # Nơi chứa ảnh tách ra
-FPS_EXTRACT = 30                        # Số khung hình/giây (Nên khớp với video gốc)
+VIDEO_FOLDER = "data"                   # Thư mục chứa các file video
+OUTPUT_ROOT = "frames_raw"     # Thư mục gốc để chứa frames
 
-def extract_frames():
-    # 1. Dọn dẹp folder cũ
-    if os.path.exists(OUTPUT_FOLDER):
-        shutil.rmtree(OUTPUT_FOLDER)
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
-    print(f"🚀 Đang tách frame từ {VIDEO_INPUT} bằng FFmpeg...")
-
-    # 2. Lệnh FFmpeg
-    # %06d.jpg nghĩa là đặt tên file: 000001.jpg, 000002.jpg...
+def get_video_fps_fraction(path):
+    """Lấy FPS dạng phân số từ video (vd: '30000/1001')"""
     cmd = [
-        'ffmpeg',
-        '-i', VIDEO_INPUT,
-        '-vf', f'fps={FPS_EXTRACT}', 
-        '-q:v', '2',  # Chất lượng ảnh (1-31, 2 là rất tốt)
-        f'{OUTPUT_FOLDER}/frame_%06d.jpg'
+        "ffprobe",
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        path
     ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    data = json.loads(result.stdout)
+
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") == "video":
+            return stream.get("r_frame_rate")
+
+    raise ValueError("Không tìm thấy stream FPS.")
+
+def extract_frames_for_video(video_path):
+    filename = os.path.basename(video_path)
+    video_name = os.path.splitext(filename)[0]  # bỏ đuôi .mp4
     
+    output_folder = os.path.join(OUTPUT_ROOT, video_name)
+
+    # Xóa folder cũ nếu có
+    if os.path.exists(output_folder):
+        shutil.rmtree(output_folder)
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Lấy FPS chuẩn
+    fps_fraction = get_video_fps_fraction(video_path)
+    print(f"🎥 {filename}: FPS = {fps_fraction}")
+
+    print(f"🚀 Đang tách frame -> {output_folder}")
+
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-vf", f"fps={fps_fraction}",
+        "-q:v", "2",
+        f"{output_folder}/frame_%06d.jpg"
+    ]
+
     subprocess.run(cmd)
-    print(f"✅ Đã tách xong ảnh vào thư mục: {OUTPUT_FOLDER}")
+    print(f"✅ Hoàn tất {filename}\n")
+
+def process_all_videos():
+    # Tạo thư mục root nếu chưa có
+    os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+    # Lặp qua tất cả file video trong thư mục
+    for file in os.listdir(VIDEO_FOLDER):
+        if file.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
+            video_path = os.path.join(VIDEO_FOLDER, file)
+            extract_frames_for_video(video_path)
 
 if __name__ == "__main__":
-    extract_frames()
+    process_all_videos()

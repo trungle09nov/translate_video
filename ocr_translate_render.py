@@ -8,9 +8,9 @@ from paddleocr import PaddleOCR
 from deep_translator import GoogleTranslator
 
 # ================= CẤU HÌNH =================
-RAW_DIR = "workspace/frames_raw"         # Ảnh gốc (từ phần 1)
-JSON_DIR = "workspace/json_cache"        # Nơi lưu kết quả OCR
-TRANSLATED_DIR = "workspace/frames_done" # Ảnh đã dịch và vẽ
+RAW_DIR = "./frames_raw"         # Ảnh gốc (từ phần 1)
+JSON_DIR = "./json_cache"        # Nơi lưu kết quả OCR
+TRANSLATED_DIR = "./frames_done" # Ảnh đã dịch và vẽ
 FONT_PATH = "arial.ttf"                  # Đường dẫn font (Window: C:/Windows/Fonts/arial.ttf)
 
 # Cấu hình ngôn ngữ
@@ -94,10 +94,17 @@ def get_optimal_font(draw, text, box_w, box_h, font_path):
     return font, lines, safe_h, 12
 
 # ================= XỬ LÝ CHÍNH =================
-def process_frame(img_path):
+def process_frame(img_path, rel_subdir):
     filename = os.path.basename(img_path)
-    json_path = os.path.join(JSON_DIR, filename.replace(".jpg", ".json"))
-    out_path = os.path.join(TRANSLATED_DIR, filename)
+
+    json_dir = os.path.join(JSON_DIR, rel_subdir)
+    out_dir = os.path.join(TRANSLATED_DIR, rel_subdir)
+
+    os.makedirs(json_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+
+    json_path = os.path.join(json_dir, filename.replace(".jpg", ".json"))
+    out_path = os.path.join(out_dir, filename)
 
     # 1. KIỂM TRA CACHE OCR (Nếu có rồi thì không OCR lại)
     if os.path.exists(json_path):
@@ -194,13 +201,33 @@ def process_frame(img_path):
     img_pil.save(out_path)
 
 def main():
-    files = sorted(glob.glob(f"{RAW_DIR}/*.jpg"))
-    print(f"Tìm thấy {len(files)} frames. Bắt đầu xử lý...")
-    
-    for i, f in enumerate(files):
-        print(f"[{i+1}/{len(files)}] Processing: {os.path.basename(f)}", end='\r')
-        process_frame(f)
-    print("\n✅ Hoàn tất xử lý ảnh!")
+    print("🔍 Đang tìm tất cả ảnh trong thư mục frames_raw...")
+
+    # Duyệt toàn bộ cây thư mục frames_raw
+    for root, dirs, files in os.walk(RAW_DIR):
+
+        # relative subdir = đường dẫn con để giữ cấu trúc
+        rel_subdir = os.path.relpath(root, RAW_DIR)
+        if rel_subdir == ".": 
+            rel_subdir = ""
+
+        # Lọc danh sách ảnh
+        jpg_files = sorted([f for f in files if f.lower().endswith(".jpg")])
+
+        if not jpg_files:
+            continue
+
+        print(f"\n📁 Thư mục: {root}  -> {len(jpg_files)} ảnh")
+
+        for i, file in enumerate(jpg_files):
+            img_path = os.path.join(root, file)
+            print(f"[{i+1}/{len(jpg_files)}] {img_path}", end="\r")
+
+            # Gọi xử lý frame
+            process_frame(img_path, rel_subdir)
+
+    print("\n\n✅ Hoàn tất xử lý tất cả ảnh!")
+
 
 if __name__ == "__main__":
     main()
