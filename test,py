@@ -1,0 +1,257 @@
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import warnings
+import json
+import os
+
+warnings.filterwarnings('ignore')
+
+# --- Import PaddleOCR ---
+from paddleocr import PaddleOCR
+from deep_translator import GoogleTranslator
+
+# --- Cấu hình ---
+INPUT_IMAGE_PATH = "video/images/original/frame_001832.jpg"
+OUTPUT_IMAGE_PATH = "output/translated_frame_argos_v2.jpg"
+
+FROM_CODE = "de"
+TO_CODE = "en"
+
+
+# --------------------------------------------------------
+# 1. Khởi tạo PaddleOCR
+# --------------------------------------------------------
+def initialize_ocr():
+    print("1. Khởi tạo PaddleOCR...")
+    ocr = PaddleOCR(
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+        lang='german'
+    )
+    return ocr
+
+
+# --------------------------------------------------------
+# 2. API dịch văn bản
+# --------------------------------------------------------
+def translate_text(text_list):
+    if not text_list:
+        return []
+
+    translator = GoogleTranslator(source='de', target='en')
+    translated_texts = []
+
+    for text in text_list:
+        try:
+            # Bỏ qua text rỗng
+            if not text or not text.strip():
+                translated_texts.append(text)
+                print(f"  ⊗ Bỏ qua text rỗng")
+                continue
+
+            translated = translator.translate(text)
+
+            # Kiểm tra kết quả dịch
+            if translated is None or not translated.strip():
+                print(f"  ⚠ '{text}' → (giữ nguyên - dịch thất bại)")
+                translated_texts.append(text)
+            else:
+                translated_texts.append(translated)
+                print(f"  ✓ '{text}' → '{translated}'")
+
+        except Exception as e:
+            print(f"  ✗ Lỗi dịch '{text}': {e}")
+            translated_texts.append(text)  # Giữ nguyên text gốc nếu lỗi
+
+    return translated_texts
+
+
+# --------------------------------------------------------
+# 3. Vẽ text đã dịch vào bounding box
+# --------------------------------------------------------
+# --------------------------------------------------------
+# 3. Vẽ text đã dịch vào bounding box
+# --------------------------------------------------------
+def draw_translated_text(image_path, results):
+    print("\n4. Đang chèn text đã dịch vào ảnh...")
+
+    img = Image.open(image_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    try:
+        default_font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)  # Bold để rõ hơn
+    except:
+        try:
+            default_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
+        except:
+            default_font = ImageFont.load_default()
+
+    for item in results:
+        box = item['box']
+        translated = item['translated_text']
+
+        # CRITICAL FIX: Kiểm tra translated không phải None hoặc rỗng
+        if translated is None or not str(translated).strip():
+            print(f"  ⚠ Bỏ qua vẽ text rỗng tại box {box}")
+            continue
+
+        # Đảm bảo translated là string
+        translated = str(translated).strip()
+
+        # box có thể là rec_polys (4 points) hoặc rec_boxes (x1,y1,x2,y2)
+        if len(box) == 4 and isinstance(box[0], (list, tuple, np.ndarray)):
+            # Trường hợp rec_polys: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            x_coords = [p[0] for p in box]
+            y_coords = [p[1] for p in box]
+            x_min = int(min(x_coords))
+            y_min = int(min(y_coords))
+            x_max = int(max(x_coords))
+            y_max = int(max(y_coords))
+        else:
+            # Trường hợp rec_boxes: [x1, y1, x2, y2]
+            x_min, y_min, x_max, y_max = map(int, box)
+
+        height = y_max - y_min
+        width = x_max - x_min
+
+        # Bỏ qua box quá nhỏ
+        if height < 5 or width < 5:
+            print(f"  ⚠ Bỏ qua box quá nhỏ: {width}x{height}")
+            continue
+
+        # Xóa text cũ - ĐỔI SANG NỀN TRẮNG
+        draw.rectangle([(x_min, y_min), (x_max, y_max)], fill="white")
+
+        # Font size động - TĂNG CỠ CHỮ (từ 0.6 lên 0.8)
+        font_size = max(14, int(height * 0.8))  # Tăng từ 0.6 lên 0.8
+
+        try:
+            # Dùng font Bold để rõ hơn
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+        except:
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+            except:
+                font = default_font
+
+        # Canh text theo chiều dọc (center vertical)
+        text_y = y_min + (height - font_size) // 2
+
+        # Vẽ text màu ĐEN trên nền TRẮNG
+        try:
+            draw.text((x_min + 2, text_y), translated, fill="black", font=font)
+        except Exception as e:
+            print(f"  ✗ Lỗi vẽ text '{translated}': {e}")
+
+    img.save(OUTPUT_IMAGE_PATH)
+    print(f"\n✓ Ảnh đã lưu tại: {OUTPUT_IMAGE_PATH}")
+
+
+# --------------------------------------------------------
+# MAIN
+# --------------------------------------------------------
+def main():
+    print("=" * 50)
+    print("BẮT ĐẦU DỊCH ẢNH")
+    print("=" * 50)
+
+    ocr = initialize_ocr()
+    print(f"\n2. OCR ảnh: {INPUT_IMAGE_PATH}")
+
+    # ---- CHẠY OCR với predict() ----
+    result = ocr.predict(INPUT_IMAGE_PATH)
+
+    if not result:
+        print("✗ Không tìm thấy text.")
+        return
+
+    # ---- TRÍCH XUẤT TEXT & BOX từ result ----
+    print("\n📝 Trích xuất dữ liệu OCR...")
+
+    if not isinstance(result, list) or len(result) == 0:
+        print("✗ Result không hợp lệ")
+        return
+
+    # Lưu kết quả OCR ra file
+    for res in result:
+        res.print()
+        res.save_to_img("output")
+        res.save_to_json("output")
+
+    # Đọc lại từ JSON
+    json_filename = f'output/{os.path.basename(INPUT_IMAGE_PATH).replace(".jpg", "_res.json")}'
+
+    if not os.path.exists(json_filename):
+        print(f"✗ Không tìm thấy file JSON: {json_filename}")
+        return
+
+    with open(json_filename, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    rec_texts = data['rec_texts']
+    rec_scores = data['rec_scores']
+    rec_boxes = data['rec_boxes']
+
+    print(f"🔍 Tìm thấy {len(rec_texts)} đoạn text trong ảnh")
+
+    # ---- TRÍCH XUẤT TEXT & BOX ----
+    print("\n📝 Văn bản tìm được:")
+    detected_boxes = []
+    original_texts = []
+
+    for i in range(len(rec_texts)):
+        text = rec_texts[i]
+        score = float(rec_scores[i])
+        box = rec_boxes[i]  # [x1, y1, x2, y2]
+
+        # Bỏ qua text rỗng hoặc score thấp
+        if not text or not str(text).strip() or score < 0.25:
+            print(f"  ⊗ Bỏ qua: '{text}' (score {score:.2f})")
+            continue
+
+        print(f"  [{i}] '{text}' (score {score:.2f})")
+
+        detected_boxes.append({
+            "box": box,  # [x1, y1, x2, y2]
+            "original_text": text,
+            "confidence": score
+        })
+        original_texts.append(text)
+
+    print(f"\n→ Tổng cộng {len(original_texts)} đoạn text hợp lệ")
+
+    if not original_texts:
+        print("✗ Không có text nào đủ điều kiện để dịch.")
+        return
+
+    # ---- DỊCH ----
+    print("\n3. Đang dịch...")
+    translated_texts = translate_text(original_texts)
+
+    # Ghép lại theo cùng index
+    final_results = []
+    for i, item in enumerate(detected_boxes):
+        item["translated_text"] = translated_texts[i]
+        final_results.append(item)
+
+    print("\n📋 Kết quả cuối:")
+    for f in final_results:
+        orig = f['original_text']
+        trans = f['translated_text']
+        print(f"  '{orig}' → '{trans}'")
+
+    # ---- VẼ LÊN ẢNH ----
+    draw_translated_text(INPUT_IMAGE_PATH, final_results)
+
+    print("\n" + "=" * 50)
+    print("HOÀN TẤT!")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    main()
