@@ -30,7 +30,7 @@ BATCH_SIZE_TRANS = 50 # Số từ dịch cùng lúc
 # ================= KHỞI TẠO =================
 # PaddleOCR
 try:
-    ocr_engine = PaddleOCR(lang='german')
+    ocr_engine = PaddleOCR(use_gpu=True, lang='german', use_angle_cls=False)
 except:
     print("⚠️ Cảnh báo: Không load được PaddleOCR.")
     exit()
@@ -158,14 +158,6 @@ def worker_ocr_process(gpu_id, image_files):
     
     print(f"🚀 Worker khởi động trên GPU {gpu_id} | Xử lý {len(image_files)} ảnh...")
 
-    # 2. Khởi tạo PaddleOCR (Phải khởi tạo bên trong process)
-    # use_gpu=True là bắt buộc
-    try:
-        ocr_engine = PaddleOCR(lang='german', use_gpu=True)
-    except Exception as e:
-        print(f"❌ Lỗi khởi tạo GPU {gpu_id}: {e}")
-        return
-
     # 3. Chạy vòng lặp xử lý Batch
     total_files = len(image_files)
     
@@ -186,7 +178,7 @@ def worker_ocr_process(gpu_id, image_files):
 
         try:
             # Gửi batch vào GPU
-            results = ocr_engine.ocr(batch_imgs)
+            results = ocr_engine.predict(batch_imgs)
             
             # Xử lý kết quả trả về
             for idx, res in enumerate(results):
