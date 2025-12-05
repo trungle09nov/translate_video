@@ -16,7 +16,10 @@ FONT_PATH = "arial.ttf"          # Font chữ
 LANG_SOURCE = 'de' 
 LANG_TARGET = 'en'
 BATCH_SIZE = 50 # Số lượng từ dịch một lần (để tránh bị Google chặn)
-
+# ================= CẤU HÌNH BATCH OCR =================
+BATCH_SIZE_OCR = 16  # Số lượng ảnh OCR cùng lúc. 
+                    # Nếu có GPU, hãy tăng lên 16 hoặc 32. 
+                    # Nếu CPU yếu hoặc RAM ít, hãy để 4 hoặc 8.
 # ================= KHỞI TẠO =================
 # Khởi tạo PaddleOCR
 try:
@@ -74,78 +77,109 @@ def get_optimal_font(draw, text, box_w, box_h, font_path):
     font = ImageFont.load_default()
     return font, [text], safe_h, 12
 
-# ================= BƯỚC 1: QUÉT OCR & TẠO JSON =================
+# ================= BƯỚC 1: QUÉT OCR BATCH & TẠO JSON =================
 def step1_ocr_scan():
-    print("\n🔹 BƯỚC 1: QUÉT ẢNH VÀ TẠO FILE JSON (OCR GỐC)...")
+    print(f"\n🔹 BƯỚC 1: QUÉT ẢNH VÀ TẠO FILE JSON (BATCH SIZE: {BATCH_SIZE_OCR})...")
     
-    count = 0
+    # 1. Quét toàn bộ file ảnh trước
+    all_image_files = []
     for root, dirs, files in os.walk(RAW_DIR):
         rel_subdir = os.path.relpath(root, RAW_DIR)
         if rel_subdir == ".": rel_subdir = ""
-
-        # Tạo thư mục lưu json
-        current_json_dir = os.path.join(JSON_DIR, rel_subdir)
-        os.makedirs(current_json_dir, exist_ok=True)
-
-        jpg_files = sorted([f for f in files if f.lower().endswith((".jpg", ".png", ".jpeg"))])
         
-        for file in jpg_files:
-            img_path = os.path.join(root, file)
-            json_filename = file.replace(".jpg", ".json").replace(".png", ".json")
-            json_path = os.path.join(current_json_dir, json_filename)
-
-            # 1. Nếu đã có JSON rồi thì bỏ qua (Resume)
-            if os.path.exists(json_path):
-                continue
-
-            print(f"   OCR: {file}", end="\r")
-            
-            img = cv2.imread(img_path)
-            if img is None: continue
-            
-            # --- CHẠY OCR ---
-            try:
-                result = ocr_engine.ocr(img)
-            except Exception as e:
-                print(f"\n   ⚠️ Lỗi khi OCR ảnh {file}: {e}")
-                continue
-
-            ocr_data = []
-            
-            if result:
-                # ================= XỬ LÝ FORMAT DỮ LIỆU =================
-                # Kiểm tra xem result[0] là kiểu mới (Dict) hay kiểu cũ (List)
-                first_res = result[0]
+        # Tạo sẵn thư mục output
+        os.makedirs(os.path.join(JSON_DIR, rel_subdir), exist_ok=True)
+        
+        for f in files:
+            if f.lower().endswith((".jpg", ".png", ".jpeg")):
+                full_path = os.path.join(root, f)
+                json_path = os.path.join(JSON_DIR, rel_subdir, f.replace(".jpg", ".json").replace(".png", ".json"))
                 
-                # TRƯỜNG HỢP 1: Format mới (như hình bạn gửi: có rec_texts, dt_polys...)
-                if isinstance(first_res, dict) and 'rec_texts' in first_res and 'dt_polys' in first_res:
-                    texts = first_res.get('rec_texts', [])
-                    boxes = first_res.get('dt_polys', [])
-                    scores = first_res.get('rec_scores', [])
+                # Chỉ thêm vào danh sách xử lý nếu chưa có JSON
+                if not os.path.exists(json_path):
+                    all_image_files.append((full_path, json_path, f))
+
+    total_files = len(all_image_files)
+    if total_files == 0:
+        print("✅ Tất cả ảnh đã có JSON cache, không cần OCR lại.")
+        return
+
+    print(f"   Tìm thấy {total_files} ảnh cần xử lý.")
+
+    # 2. Xử lý theo từng Batch
+    for i in range(0, total_files, BATCH_SIZE_OCR):
+        batch_items = all_image_files[i : i + BATCH_SIZE_OCR]
+        
+        batch_imgs = []
+        batch_valid_items = []
+
+        # Load ảnh vào RAM
+        for img_path, json_path, filename in batch_items:
+            img = cv2.imread(img_path)
+            if img is not None:
+                batch_imgs.append(img)
+                batch_valid_items.append((img_path, json_path, filename))
+            else:
+                print(f"⚠️ Không đọc được ảnh: {filename}")
+
+        if not batch_imgs: continue
+
+        print(f"   🚀 Đang OCR batch {i}/{total_files} ({len(batch_imgs)} ảnh)...", end="\r")
+
+        try:
+            # Gửi cả list ảnh cho Paddle
+            # cls=True: tự động xoay ảnh đúng chiều
+            batch_results = ocr_engine.ocr(batch_imgs, cls=True)
+        except Exception as e:
+            print(f"\n   ❌ Lỗi OCR Batch: {e}. Đang thử chạy lẻ từng ảnh...")
+            # Fallback: Nếu batch lỗi (ví dụ do kích thước ảnh quá khác nhau), chạy lẻ
+            batch_results = []
+            for img in batch_imgs:
+                try:
+                    res = ocr_engine.ocr(img, cls=True)
+                    batch_results.append(res[0] if res else None)
+                except:
+                    batch_results.append(None)
+
+        # 3. Xử lý kết quả trả về và lưu JSON
+        # batch_results là một list, mỗi phần tử tương ứng với 1 ảnh
+        for idx, result in enumerate(batch_results):
+            img_path, json_path, filename = batch_valid_items[idx]
+            
+            ocr_data = []
+
+            # Nếu result có dữ liệu
+            if result:
+                # --- XỬ LÝ FORMAT DỮ LIỆU (DICT vs LIST) ---
+                # Code này handle cả 2 version Paddle cũ và mới
+                
+                # Case 1: Format mới (Dict) - Như hình bạn gửi
+                if isinstance(result, dict) and 'rec_texts' in result:
+                    texts = result.get('rec_texts', [])
+                    boxes = result.get('dt_polys', [])
+                    scores = result.get('rec_scores', [])
                     
-                    # Duyệt qua từng phần tử trong các mảng song song
                     for box_points, text, conf in zip(boxes, texts, scores):
                         if conf > 0.5:
-                            # Chuyển đổi box polygon thành box chữ nhật [x1, y1, x2, y2]
+                            # Convert polygon to rect
                             xs = [p[0] for p in box_points]
                             ys = [p[1] for p in box_points]
                             box = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
                             
                             ocr_data.append({
                                 "box": box,
-                                "text": text,           # Text gốc
+                                "text": text,
                                 "confidence": float(conf),
-                                "translated": ""        # ĐỂ TRỐNG (chờ bước 2)
+                                "translated": ""
                             })
 
-                # TRƯỜNG HỢP 2: Format cổ điển (List of Lists)
-                elif isinstance(first_res, list):
-                    for line in first_res:
-                        # line dạng: [ [[x1,y1]...], ("text", 0.9) ]
+                # Case 2: Format cũ (List of Lists)
+                elif isinstance(result, list):
+                    for line in result:
                         points = line[0]
                         content = line[1]
-
-                        if isinstance(content, str): # Fix lỗi index string
+                        
+                        if isinstance(content, str):
                             text = content
                             conf = 1.0
                         else:
@@ -156,28 +190,23 @@ def step1_ocr_scan():
                             xs = [p[0] for p in points]
                             ys = [p[1] for p in points]
                             box = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
-
+                            
                             ocr_data.append({
                                 "box": box,
                                 "text": text,
                                 "confidence": float(conf),
-                                "translated": "" 
+                                "translated": ""
                             })
-                # ========================================================
 
-            # 2. Tạo cấu trúc JSON đúng như bạn mong muốn
+            # Lưu file JSON
             output_json = {
-                "frame": file,
+                "frame": filename,
                 "texts": ocr_data
             }
-
-            # Lưu file
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(output_json, f, ensure_ascii=False, indent=2)
-            
-            count += 1
 
-    print(f"\n✅ Bước 1 hoàn tất: Đã tạo {count} file JSON.")
+    print(f"\n✅ Hoàn tất OCR {total_files} ảnh.")
 
 # ================= BƯỚC 2: DỊCH BATCH (NHANH HƠN) =================
 def step2_translate_batch():
