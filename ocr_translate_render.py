@@ -129,14 +129,14 @@ def step1_ocr_scan():
         try:
             # Gửi cả list ảnh cho Paddle
             # cls=True: tự động xoay ảnh đúng chiều
-            batch_results = ocr_engine.ocr(batch_imgs, cls=True)
+            batch_results = ocr_engine.ocr(batch_imgs)
         except Exception as e:
             print(f"\n   ❌ Lỗi OCR Batch: {e}. Đang thử chạy lẻ từng ảnh...")
             # Fallback: Nếu batch lỗi (ví dụ do kích thước ảnh quá khác nhau), chạy lẻ
             batch_results = []
             for img in batch_imgs:
                 try:
-                    res = ocr_engine.ocr(img, cls=True)
+                    res = ocr_engine.ocr(img)
                     batch_results.append(res[0] if res else None)
                 except:
                     batch_results.append(None)
