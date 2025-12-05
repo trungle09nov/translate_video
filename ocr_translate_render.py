@@ -3,9 +3,18 @@ import glob
 import json
 import cv2
 import numpy as np
+import math
+import time
+from multiprocessing import Process
+import paddle
 from PIL import Image, ImageDraw, ImageFont
 from paddleocr import PaddleOCR
 from deep_translator import GoogleTranslator
+
+# ================= CẤU HÌNH PHẦN CỨNG =================
+NUM_GPUS = 4           # Bạn có 4 GPU
+WORKERS_PER_GPU = 1    # 1 process cho mỗi GPU (Nếu VRAM 4060 8GB dư thì tăng lên 2)
+BATCH_SIZE_OCR = 16    # Số ảnh tống vào VRAM cùng lúc trên mỗi GPU
 
 # ================= CẤU HÌNH =================
 RAW_DIR = "./frames_raw"         # Ảnh gốc
@@ -21,7 +30,7 @@ BATCH_SIZE_TRANS = 50 # Số từ dịch cùng lúc
 # ================= KHỞI TẠO =================
 # PaddleOCR
 try:
-    ocr_engine = PaddleOCR(lang='german', use_angle_cls=True, show_log=False)
+    ocr_engine = PaddleOCR(lang='german')
 except:
     print("⚠️ Cảnh báo: Không load được PaddleOCR.")
     exit()
@@ -138,85 +147,142 @@ def render_text_in_box(draw, translated, font_path, x_min, y_min, x_max, y_max):
         current_y += line_height + spacing
 
 
-# ==========================================================
-# BƯỚC 1: OCR (Batch)
-# ==========================================================
-def step1_ocr_scan():
-    print(f"\n🔹 BƯỚC 1: QUÉT ẢNH VÀ TẠO FILE JSON (Batch: {BATCH_SIZE_OCR})...")
+# ================= HÀM XỬ LÝ CỦA TỪNG WORKER (GPU) =================
+def worker_ocr_process(gpu_id, image_files):
+    """
+    Hàm này sẽ chạy trên một Process riêng biệt.
+    Nó sẽ chiếm dụng riêng 1 GPU được chỉ định.
+    """
+    # 1. Cấu hình để Process này chỉ nhìn thấy 1 GPU duy nhất
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
-    # Tìm ảnh chưa có JSON
+    print(f"🚀 Worker khởi động trên GPU {gpu_id} | Xử lý {len(image_files)} ảnh...")
+
+    # 2. Khởi tạo PaddleOCR (Phải khởi tạo bên trong process)
+    # use_gpu=True là bắt buộc
+    try:
+        ocr_engine = PaddleOCR(lang='german', use_gpu=True)
+    except Exception as e:
+        print(f"❌ Lỗi khởi tạo GPU {gpu_id}: {e}")
+        return
+
+    # 3. Chạy vòng lặp xử lý Batch
+    total_files = len(image_files)
+    
+    # Chia nhỏ danh sách file thành các batch nhỏ hơn để tống vào GPU
+    for i in range(0, total_files, BATCH_SIZE_OCR):
+        batch_items = image_files[i : i + BATCH_SIZE_OCR]
+        batch_imgs = []
+        valid_items = []
+
+        # Load ảnh vào RAM
+        for img_path, json_path, filename in batch_items:
+            img = cv2.imread(img_path)
+            if img is not None:
+                batch_imgs.append(img)
+                valid_items.append((img_path, json_path, filename))
+        
+        if not batch_imgs: continue
+
+        try:
+            # Gửi batch vào GPU
+            results = ocr_engine.ocr(batch_imgs)
+            
+            # Xử lý kết quả trả về
+            for idx, res in enumerate(results):
+                _, json_out_path, fname = valid_items[idx]
+                ocr_data = []
+
+                if res:
+                    # Xử lý output format (Dict hoặc List)
+                    if isinstance(res, dict) and 'rec_texts' in res: # New version
+                        texts = res.get('rec_texts', [])
+                        boxes = res.get('dt_polys', [])
+                        scores = res.get('rec_scores', [])
+                        for b, t, c in zip(boxes, texts, scores):
+                            if c > 0.5:
+                                xs, ys = [p[0] for p in b], [p[1] for p in b]
+                                ocr_data.append({
+                                    "box": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
+                                    "text": t, "confidence": float(c), "translated": ""
+                                })
+                    elif isinstance(res, list): # Old version
+                        for line in res:
+                            content = line[1]
+                            txt = content if isinstance(content, str) else content[0]
+                            cnf = 1.0 if isinstance(content, str) else content[1]
+                            if cnf > 0.5:
+                                pts = line[0]
+                                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                                ocr_data.append({
+                                    "box": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
+                                    "text": txt, "confidence": float(cnf), "translated": ""
+                                })
+
+                # Lưu JSON
+                with open(json_out_path, 'w', encoding='utf-8') as f:
+                    json.dump({"frame": fname, "texts": ocr_data}, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            print(f"⚠️ Lỗi tại GPU {gpu_id}: {e}")
+
+        # Log tiến độ đơn giản
+        if i % (BATCH_SIZE_OCR * 5) == 0:
+            print(f"   [GPU {gpu_id}] Đã xong {i}/{total_files}...", end="\r")
+
+    print(f"✅ [GPU {gpu_id}] HOÀN TẤT.")
+
+# ================= BƯỚC 1: QUẢN LÝ ĐA GPU =================
+def step1_multi_gpu_ocr():
+    print(f"\n🔹 BƯỚC 1: SCAN OCR VỚI {NUM_GPUS} GPU...")
+    
+    # 1. Quét toàn bộ file
     all_tasks = []
     for root, dirs, files in os.walk(RAW_DIR):
         rel_subdir = os.path.relpath(root, RAW_DIR)
         if rel_subdir == ".": rel_subdir = ""
         os.makedirs(os.path.join(JSON_DIR, rel_subdir), exist_ok=True)
-        
+
         for f in files:
-            if f.lower().endswith((".jpg", ".png")):
+            if f.lower().endswith((".jpg", ".png", ".jpeg")):
                 json_path = os.path.join(JSON_DIR, rel_subdir, f.replace(".jpg", ".json").replace(".png", ".json"))
+                # Chỉ thêm ảnh chưa có JSON
                 if not os.path.exists(json_path):
                     all_tasks.append((os.path.join(root, f), json_path, f))
 
-    if not all_tasks:
-        print("✅ Đã có đủ JSON cache.")
+    total_images = len(all_tasks)
+    if total_images == 0:
+        print("✅ Tất cả ảnh đã được OCR trước đó.")
         return
 
-    # Chạy Batch
-    for i in range(0, len(all_tasks), BATCH_SIZE_OCR):
-        batch = all_tasks[i:i+BATCH_SIZE_OCR]
-        imgs = []
-        valid_batch = []
+    print(f"📦 Tổng số ảnh cần xử lý: {total_images}")
+
+    # 2. Chia đều công việc cho các GPU
+    # Ví dụ: 1000 ảnh / 4 GPU = 250 ảnh/GPU
+    chunk_size = math.ceil(total_images / NUM_GPUS)
+    chunks = [all_tasks[i:i + chunk_size] for i in range(0, total_images, chunk_size)]
+
+    processes = []
+
+    # 3. Khởi chạy các Process
+    start_time = time.time()
+    
+    for i in range(len(chunks)):
+        # Nếu worker ít hơn GPU (trường hợp chia dư), chỉ chạy số lượng worker cần thiết
+        if not chunks[i]: continue
         
-        for img_path, js_path, fname in batch:
-            im = cv2.imread(img_path)
-            if im is not None:
-                imgs.append(im)
-                valid_batch.append((js_path, fname))
+        gpu_id = i % NUM_GPUS # 0, 1, 2, 3
         
-        if not imgs: continue
-        print(f"   🚀 OCR {i}/{len(all_tasks)}...", end="\r")
+        p = Process(target=worker_ocr_process, args=(gpu_id, chunks[i]))
+        p.start()
+        processes.append(p)
 
-        try:
-            results = ocr_engine.ocr(imgs, cls=True)
-        except:
-            continue
+    # 4. Chờ tất cả hoàn thành
+    for p in processes:
+        p.join()
 
-        for idx, res in enumerate(results):
-            js_path, fname = valid_batch[idx]
-            ocr_data = []
-            
-            # Xử lý format output Paddle
-            if res:
-                # Format Dict (Paddle mới)
-                if isinstance(res, dict) and 'rec_texts' in res:
-                    for box, text, conf in zip(res['dt_polys'], res['rec_texts'], res['rec_scores']):
-                        if conf > 0.5:
-                            xs = [p[0] for p in box]; ys = [p[1] for p in box]
-                            ocr_data.append({
-                                "box": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
-                                "text": text, "confidence": float(conf), "translated": ""
-                            })
-                # Format List (Paddle cũ)
-                elif isinstance(res, list):
-                    for line in res:
-                        # Fix lỗi index string
-                        content = line[1]
-                        text = content if isinstance(content, str) else content[0]
-                        conf = 1.0 if isinstance(content, str) else content[1]
-                        
-                        if conf > 0.5:
-                            pts = line[0]
-                            xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-                            ocr_data.append({
-                                "box": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
-                                "text": text, "confidence": float(conf), "translated": ""
-                            })
-
-            with open(js_path, 'w', encoding='utf-8') as f:
-                json.dump({"frame": fname, "texts": ocr_data}, f, ensure_ascii=False, indent=2)
-
-    print("\n✅ Hoàn tất Bước 1.")
-
+    end_time = time.time()
+    print(f"\n✅ Hoàn tất toàn bộ OCR trong {end_time - start_time:.2f} giây.")
 
 # ==========================================================
 # BƯỚC 2: DỊCH (Batch)
@@ -329,7 +395,7 @@ def step3_render_images():
 
 # ================= MAIN =================
 def main():
-    step1_ocr_scan()
+    step1_multi_gpu_ocr()
     step2_translate_batch()
     step3_render_images()
 
