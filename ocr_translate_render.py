@@ -7,14 +7,13 @@ import math
 import time
 import gc
 from multiprocessing import Process, set_start_method
-# Lưu ý: Không import paddle hoặc khởi tạo OCR ở global scope để tránh xung đột CUDA
 
 from PIL import Image, ImageDraw, ImageFont
 from deep_translator import GoogleTranslator
 
 # ================= CẤU HÌNH PHẦN CỨNG =================
 NUM_GPUS = 4           # Số lượng GPU
-BATCH_SIZE_OCR = 16    # Số ảnh xử lý trong 1 lần load vào RAM (Batch logic của code)
+BATCH_SIZE_OCR = 16    # Batch size (Tùy VRAM, 16-32 là ổn cho 1080Ti/3060)
 
 # ================= CẤU HÌNH THƯ MỤC =================
 RAW_DIR = "./frames_raw"         
@@ -26,14 +25,14 @@ LANG_SOURCE = 'de'
 LANG_TARGET = 'en'
 BATCH_SIZE_TRANS = 50 
 
-# Khởi tạo Translator (Global OK vì nó dùng CPU/API request)
+# Khởi tạo Translator
 try:
     translator = GoogleTranslator(source=LANG_SOURCE, target=LANG_TARGET)
 except:
-    pass # Xử lý sau trong hàm dịch
+    pass 
 
 # ==========================================================
-#  CÁC HÀM VẼ (Giữ nguyên logic của bạn)
+#  CÁC HÀM VẼ & HỖ TRỢ (GIỮ NGUYÊN)
 # ==========================================================
 def wrap_text_by_width(draw, text, font, max_width):
     words = text.split()
@@ -104,27 +103,22 @@ def worker_ocr_process(gpu_id, image_files):
     """
     Worker xử lý OCR trên GPU
     """
-    # 1. QUAN TRỌNG: Set biến môi trường TRƯỚC KHI import paddle
+    # 1. Set biến môi trường TRƯỚC KHI import paddle
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
-    # 2. Import Paddle bên trong worker (để tránh xung đột context với main)
     import paddle
     from paddleocr import PaddleOCR
 
-    # 3. Set device cụ thể cho process này
-    # Lưu ý: Khi đã set CUDA_VISIBLE_DEVICES="2" thì process chỉ nhìn thấy 1 GPU
-    # và nó được đánh số là 0. Vì vậy luôn set là 'gpu:0'
+    # 2. Set device cụ thể
     paddle.device.set_device('gpu:0')
 
     print(f"🚀 Worker GPU {gpu_id} (PID {os.getpid()}) khởi động...")
     
     try:
-        # 4. Khởi tạo Engine với tham số use_gpu=True
-        # gpu_mem=500: Dành ra 500MB VRAM khởi tạo, tránh chiếm hết ngay lập tức
+        # 3. Khởi tạo Engine (ĐÃ SỬA: Uncomment use_gpu=True)
         ocr_engine = PaddleOCR(
             lang='german', 
             use_angle_cls=False, 
-            # use_gpu=True,            # <--- BẮT BUỘC
         )
     except Exception as e:
         print(f"❌ GPU {gpu_id} lỗi Init: {e}")
@@ -133,7 +127,6 @@ def worker_ocr_process(gpu_id, image_files):
     total_files = len(image_files)
     processed_count = 0
     
-    # Loop xử lý batch
     for i in range(0, total_files, BATCH_SIZE_OCR):
         batch_items = image_files[i : i + BATCH_SIZE_OCR]
         loaded_images = [] 
@@ -148,27 +141,27 @@ def worker_ocr_process(gpu_id, image_files):
                 pass
         
         if not loaded_images: continue
+        
+        # Lưu lại số lượng ảnh trong batch này để tính toán sau (trước khi xóa biến)
+        current_batch_count = len(loaded_images)
 
-        # OCR từng ảnh
+        # OCR xử lý
         for img, json_out_path, fname in loaded_images:
             try:
                 result = ocr_engine.predict(img)
                 ocr_data = []
 
-                # --- SAFE PARSING ---
                 if result and isinstance(result, list) and result[0]:
                     for line in result[0]:
                         try:
                             box = line[0]
                             content = line[1]
-                            # content structure: ('text', score)
                             text = content[0]
                             score = content[1]
 
-                            if score > 0.6: # Tăng ngưỡng tự tin lên 0.6 cho sạch
+                            if score > 0.6:
                                 xs = [pt[0] for pt in box]
                                 ys = [pt[1] for pt in box]
-                                
                                 ocr_data.append({
                                     "box": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
                                     "text": str(text),
@@ -183,28 +176,28 @@ def worker_ocr_process(gpu_id, image_files):
 
             except Exception as e:
                 print(f"❌ Lỗi {fname} trên GPU {gpu_id}: {e}")
+        
         # ==========================================================
-        # 🟢 ĐOẠN QUAN TRỌNG: CLEAR RAM & VRAM SAU MỖI BATCH
+        # 🟢 CLEAN UP MEMORY (ĐÃ SỬA LOGIC)
         # ==========================================================
         
-        # 1. Xóa biến chứa ảnh nặng
+        # 1. Xóa biến
         del loaded_images
         del batch_items
         
-        # 2. Ép Python dọn rác RAM ngay lập tức
+        # 2. Ép dọn rác RAM
         gc.collect()
 
-        # 3. Ép Paddle/CUDA xả cache GPU (để tránh OOM khi chạy lâu)
+        # 3. Ép dọn VRAM (GPU)
         try:
             paddle.device.cuda.empty_cache()
         except:
-            pass # Bỏ qua nếu phiên bản paddle cũ không hỗ trợ
+            pass 
         
-        # ==========================================================
-        # Cập nhật tiến độ
-        processed_count += len(loaded_images)
+        # 4. Cập nhật tiến độ (Dùng biến tạm đã lưu, không gọi len() trên biến đã xóa)
+        processed_count += current_batch_count
+        
         if i % (BATCH_SIZE_OCR * 2) == 0:
-            # In ra log có kèm GPU ID để dễ debug xem con nào đang chạy
             print(f"   [GPU {gpu_id}] Đã xong: {processed_count}/{total_files} ảnh", end="\r")
 
     print(f"✅ [GPU {gpu_id}] HOÀN TẤT.")
@@ -212,22 +205,17 @@ def worker_ocr_process(gpu_id, image_files):
 
 # ================= SỬA BƯỚC 1: QUẢN LÝ ĐA GPU =================
 def step1_multi_gpu_ocr():
-    # --- PHẦN MỚI: WARM-UP MODEL ---
-    # Mục đích: Tải model về cache 1 lần duy nhất trước khi chia process
-    # để tránh 4 worker cùng tranh nhau tải file gây crash/hang.
-    print("🔹 Pre-check: Đang kiểm tra/tải model PaddleOCR (Warm-up)...")
+    print("🔹 Pre-check: Warm-up model PaddleOCR...")
     try:
         from paddleocr import PaddleOCR
-        # Chạy thử init 1 lần trên CPU để đảm bảo file model đã có
+        # Init 1 lần trên CPU để tải model về cache, tránh race condition file lock
         PaddleOCR(lang='german', use_angle_cls=False)
         print("✅ Model check OK.")
     except Exception as e:
         print(f"⚠️ Warning Warm-up: {e}")
-    # -------------------------------
 
     print(f"\n🔹 BƯỚC 1: SCAN OCR VỚI {NUM_GPUS} GPU...")
     
-    # ... (Phần quét file giữ nguyên như cũ) ...
     all_tasks = []
     for root, dirs, files in os.walk(RAW_DIR):
         rel_subdir = os.path.relpath(root, RAW_DIR)
@@ -247,11 +235,10 @@ def step1_multi_gpu_ocr():
 
     print(f"📦 Tổng số ảnh cần xử lý: {total_images}")
     
-    # Sắp xếp task ngẫu nhiên để tránh việc 1 GPU nhận toàn ảnh nặng, 1 GPU toàn ảnh nhẹ
+    # Shuffle để chia đều ảnh nặng/nhẹ cho các GPU
     import random
     random.shuffle(all_tasks)
 
-    # Chia đều công việc
     chunk_size = math.ceil(total_images / NUM_GPUS)
     chunks = [all_tasks[i:i + chunk_size] for i in range(0, total_images, chunk_size)]
 
@@ -356,7 +343,6 @@ def step3_render_images():
     print("\n✅ Hoàn tất toàn bộ quy trình!")
 
 def main():
-    # Set start method thành spawn để an toàn với CUDA
     try:
         set_start_method('spawn')
     except RuntimeError:
