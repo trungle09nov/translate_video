@@ -124,8 +124,6 @@ def worker_ocr_process(gpu_id, image_files):
             lang='german', 
             use_angle_cls=False, 
             use_gpu=True,            # <--- BẮT BUỘC
-            gpu_mem=500,             # <--- Tối ưu VRAM
-            show_log=False           # Tắt log rác của Paddle
         )
     except Exception as e:
         print(f"❌ GPU {gpu_id} lỗi Init: {e}")
