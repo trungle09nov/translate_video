@@ -123,7 +123,7 @@ def worker_ocr_process(gpu_id, image_files):
         ocr_engine = PaddleOCR(
             lang='german', 
             use_angle_cls=False, 
-            use_gpu=True,            # <--- BẮT BUỘC
+            # use_gpu=True,            # <--- BẮT BUỘC
         )
     except Exception as e:
         print(f"❌ GPU {gpu_id} lỗi Init: {e}")
@@ -201,7 +201,7 @@ def step1_multi_gpu_ocr():
     try:
         from paddleocr import PaddleOCR
         # Chạy thử init 1 lần trên CPU để đảm bảo file model đã có
-        PaddleOCR(lang='german', use_angle_cls=False, show_log=False, use_gpu=False)
+        PaddleOCR(lang='german', use_angle_cls=False)
         print("✅ Model check OK.")
     except Exception as e:
         print(f"⚠️ Warning Warm-up: {e}")
