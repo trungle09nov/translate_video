@@ -49,7 +49,7 @@ def assemble_video_for_folder(subdir):
     # Ghép lại: dùng FPS gốc → khớp 100% với video ban đầu
     cmd = [
         "ffmpeg", "-y",
-        "-framerate", str(fps),                  # FPS từ video gốc
+        "-framerate", "1", # str(fps),                  # FPS từ video gốc
         "-i", f"{frames_dir}/frame_%06d.jpg",    # Frames đã xử lý
         "-i", video_source,                      # Lấy audio từ video gốc
         "-c:v", "libx264",

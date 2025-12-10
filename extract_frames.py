@@ -42,9 +42,9 @@ def extract_frames_for_video(video_path):
     print(f"🚀 Đang tách frame -> {output_folder}")
 
     cmd = [
-        "ffmpeg",
-        "-i", video_path,
-        "-vf", f"fps={fps_fraction}",
+        "ffmpeg", "-i", video_path,
+        "-vf", "fps=1",
+        "-vsync", "vfr",
         "-q:v", "2",
         f"{output_folder}/frame_%06d.jpg"
     ]

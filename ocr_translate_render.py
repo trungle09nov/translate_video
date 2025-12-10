@@ -7,14 +7,16 @@ import math
 import time
 import gc
 from multiprocessing import Process, set_start_method
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image, ImageDraw, ImageFont
 from deep_translator import GoogleTranslator
 
 # ================= CẤU HÌNH PHẦN CỨNG =================
 NUM_GPUS = 4
-BATCH_SIZE_OCR = 32  # Số ảnh xử lý cùng lúc trên GPU
-TRANSLATE_BATCH_SIZE = 50  # Số text dịch cùng lúc
+BATCH_SIZE_OCR = 32  # Giảm lại để ổn định
+TRANSLATE_BATCH_SIZE = 50  # Tăng translate batch
+RENDER_THREADS = 4  # Số thread cho rendering song song
 
 # ================= CẤU HÌNH THƯ MỤC =================
 RAW_DIR = "./frames_raw"         
@@ -92,10 +94,37 @@ def render_text_in_box(draw, translated, font_path, x_min, y_min, x_max, y_max):
         draw.text((start_x, current_y), line, fill="black", font=font)
         current_y += line_height + spacing
 
+# ==========================================================
+#  HÀM RENDER SONG SONG
+# ==========================================================
+def render_image_worker(args):
+    """Worker function để render ảnh song song"""
+    img_path, ocr_data, out_path = args
+    try:
+        if len(ocr_data) == 0:
+            # No text, copy original
+            import shutil
+            shutil.copy(img_path, out_path)
+            return True
+        
+        # Render with translations
+        img_pil = Image.open(img_path).convert("RGB")
+        draw = ImageDraw.Draw(img_pil)
+
+        for item in ocr_data:
+            text_content = item.get('translated') if item.get('translated') else item['text']
+            x1, y1, x2, y2 = item['box']
+            render_text_in_box(draw, text_content, FONT_PATH, x1, y1, x2, y2)
+
+        img_pil.save(out_path)
+        return True
+    except Exception as e:
+        return False
+
 # ================= WORKER OCR + TRANSLATE + RENDER =================
 def worker_ocr_translate_render(gpu_id, image_files):
     """
-    Worker xử lý OCR + Translate + Render ngay trong batch
+    Worker xử lý OCR + Translate + Render theo batch
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
@@ -130,6 +159,7 @@ def worker_ocr_translate_render(gpu_id, image_files):
     processed_count = 0
     success_count = 0
     error_count = 0
+    empty_ocr_count = 0
     
     debug_dir = os.path.join(JSON_DIR, f"debug_gpu_{gpu_id}")
     os.makedirs(debug_dir, exist_ok=True)
@@ -138,6 +168,7 @@ def worker_ocr_translate_render(gpu_id, image_files):
         batch_items = image_files[i : i + BATCH_SIZE_OCR]
         loaded_images = [] 
         
+        # Load batch
         for img_path, json_path, filename in batch_items:
             try:
                 if os.path.exists(img_path):
@@ -151,19 +182,20 @@ def worker_ocr_translate_render(gpu_id, image_files):
         current_batch_count = len(loaded_images)
         
         # ==========================================================
-        # STEP 1: OCR BATCH
+        # STEP 1: OCR BATCH - Dùng predict() như code cũ
         # ==========================================================
-        batch_ocr_results = []  # Store OCR results for all images in batch
+        batch_ocr_results = []
         
         for img_path, json_out_path, fname in loaded_images:
             ocr_data = []
             
             try:
-                # ✅ FIX: Predict từng ảnh, KHÔNG batch predict
-                result = ocr_engine.predict(img_path)  # Single predict
+                # ✅ Dùng predict() từng ảnh
+                result = ocr_engine.predict(img_path)
                 
                 if not result or not isinstance(result, list) or len(result) == 0:
                     batch_ocr_results.append((json_out_path, fname, img_path, []))
+                    empty_ocr_count += 1
                     continue
 
                 # Parse OCR result
@@ -232,8 +264,12 @@ def worker_ocr_translate_render(gpu_id, image_files):
                                 continue
                 
                 # Store result
+                if len(ocr_data) == 0:
+                    empty_ocr_count += 1
+                else:
+                    success_count += 1
+                    
                 batch_ocr_results.append((json_out_path, fname, img_path, ocr_data))
-                success_count += 1
 
             except Exception as e:
                 error_count += 1
@@ -265,7 +301,7 @@ def worker_ocr_translate_render(gpu_id, image_files):
                                 trans_map[orig] = trans
                         except Exception as e2:
                             # Fallback: translate one by one
-                            for orig in chunk[:10]:  # Limit to 10 to avoid timeout
+                            for orig in chunk[:10]:
                                 try:
                                     trans_map[orig] = translator.translate(orig)
                                 except:
@@ -281,7 +317,7 @@ def worker_ocr_translate_render(gpu_id, image_files):
                         item['translated'] = trans_map[txt]
         
         # ==========================================================
-        # STEP 3: SAVE JSON + RENDER (cho từng ảnh)
+        # STEP 3: SAVE JSON
         # ==========================================================
         for json_out_path, fname, img_path, ocr_data in batch_ocr_results:
             try:
@@ -291,39 +327,32 @@ def worker_ocr_translate_render(gpu_id, image_files):
                         "frame": fname, 
                         "texts": ocr_data
                     }, f, ensure_ascii=False, indent=2)
-                
-                # Render image
-                if os.path.exists(img_path):
-                    # Output path
-                    rel_path = os.path.relpath(img_path, RAW_DIR)
-                    rel_dir = os.path.dirname(rel_path)
-                    out_subdir = os.path.join(TRANSLATED_DIR, rel_dir)
-                    os.makedirs(out_subdir, exist_ok=True)
-                    out_path = os.path.join(out_subdir, os.path.basename(img_path))
-                    
-                    if len(ocr_data) == 0:
-                        # No text, copy original
-                        import shutil
-                        shutil.copy(img_path, out_path)
-                    else:
-                        # Render with translations
-                        img_pil = Image.open(img_path).convert("RGB")
-                        draw = ImageDraw.Draw(img_pil)
-
-                        for item in ocr_data:
-                            text_content = item.get('translated') if item.get('translated') else item['text']
-                            x1, y1, x2, y2 = item['box']
-                            render_text_in_box(draw, text_content, FONT_PATH, x1, y1, x2, y2)
-
-                        img_pil.save(out_path)
-            
             except Exception as e:
-                print(f"   ⚠️ [GPU {gpu_id}] Error saving/rendering {fname}: {e}")
+                print(f"   ⚠️ [GPU {gpu_id}] Error saving JSON {fname}: {e}")
+        
+        # ==========================================================
+        # STEP 4: PARALLEL RENDER
+        # ==========================================================
+        render_tasks = []
+        for json_out_path, fname, img_path, ocr_data in batch_ocr_results:
+            if os.path.exists(img_path):
+                rel_path = os.path.relpath(img_path, RAW_DIR)
+                rel_dir = os.path.dirname(rel_path)
+                out_subdir = os.path.join(TRANSLATED_DIR, rel_dir)
+                os.makedirs(out_subdir, exist_ok=True)
+                out_path = os.path.join(out_subdir, os.path.basename(img_path))
+                
+                render_tasks.append((img_path, ocr_data, out_path))
+        
+        # Render song song với ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=RENDER_THREADS) as executor:
+            list(executor.map(render_image_worker, render_tasks))
         
         # Clean up memory
         del loaded_images
         del batch_items
         del batch_ocr_results
+        del render_tasks
         gc.collect()
         
         try:
@@ -335,9 +364,9 @@ def worker_ocr_translate_render(gpu_id, image_files):
         
         # Progress update
         if i % (BATCH_SIZE_OCR * 2) == 0:
-            print(f"   [GPU {gpu_id}] Progress: {processed_count}/{total_files} ({success_count} OK, {error_count} errors)")
+            print(f"   [GPU {gpu_id}] Progress: {processed_count}/{total_files} ({success_count} OK, {empty_ocr_count} empty, {error_count} errors)")
 
-    print(f"✅ [GPU {gpu_id}] COMPLETED: {success_count} success, {error_count} errors")
+    print(f"✅ [GPU {gpu_id}] COMPLETED: {success_count} success, {empty_ocr_count} empty OCR, {error_count} errors")
 
 
 # ================= MAIN PIPELINE =================
@@ -348,7 +377,7 @@ def step1_multi_gpu_ocr_translate_render():
     print("🔹 Pre-check: Warm-up model PaddleOCR...")
     try:
         from paddleocr import PaddleOCR
-        PaddleOCR(lang='german', use_angle_cls=False, show_log=False)
+        PaddleOCR(lang='german', use_angle_cls=False)
         print("✅ Model check OK.")
     except Exception as e:
         print(f"⚠️ Warning: {e}")
@@ -408,20 +437,21 @@ def main():
         pass
     
     print("=" * 70)
-    print("🎬 VIDEO TRANSLATION PIPELINE - ALL-IN-ONE MODE")
+    print("🎬 VIDEO TRANSLATION PIPELINE - OPTIMIZED")
     print("=" * 70)
     print(f"Configuration:")
     print(f"  GPUs: {NUM_GPUS}")
     print(f"  OCR Batch: {BATCH_SIZE_OCR}")
     print(f"  Translate Batch: {TRANSLATE_BATCH_SIZE}")
+    print(f"  Render Threads: {RENDER_THREADS}")
     print(f"  Source: {RAW_DIR}")
     print(f"  Output: {TRANSLATED_DIR}")
-    print(f"  Process: OCR → Translate → Render (in same batch)")
+    print(f"  Process: OCR (predict) → Batch Translate → Parallel Render")
     print("=" * 70)
     
     start_time = time.time()
     
-    step1_multi_gpu_ocr_translate_render()  # All in one!
+    step1_multi_gpu_ocr_translate_render()
     
     total_time = time.time() - start_time
     print("\n" + "=" * 70)
