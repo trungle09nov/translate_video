@@ -2,16 +2,19 @@ import os
 import json
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import Process
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 import shutil
+import math
 
 # ================= CẤU HÌNH =================
 RAW_DIR = "./frames_raw"         # Frames gốc
 JSON_DIR = "./json_cache"        # JSON đã dịch
 OUTPUT_DIR = "./frames_done"     # Frames output
 FONT_PATH = "arial.ttf"
-RENDER_THREADS = 8               # Số thread render song song
+RENDER_THREADS = 8               # Threads per GPU
+NUM_GPUS = 4                     # Số GPU
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -155,15 +158,39 @@ def render_image_worker(task):
         return False
 
 
+# ================= WORKER PROCESS PER GPU =================
+def gpu_worker(gpu_id, tasks):
+    """Worker chạy trên 1 GPU với ThreadPoolExecutor"""
+    # Set GPU (không thực sự cần vì render chỉ dùng CPU, nhưng để tránh conflict)
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
+    print(f"🚀 GPU Worker {gpu_id} started with {len(tasks)} tasks")
+    
+    success_count = 0
+    
+    # Render với threads
+    with ThreadPoolExecutor(max_workers=RENDER_THREADS) as executor:
+        futures = {executor.submit(render_image_worker, task): task for task in tasks}
+        
+        for future in as_completed(futures):
+            if future.result():
+                success_count += 1
+    
+    print(f"✅ GPU Worker {gpu_id} completed: {success_count}/{len(tasks)}")
+    return success_count
+
+
 # ================= MAIN =================
 def main():
     print("=" * 70)
-    print("🎨 RENDER IMAGES FROM TRANSLATED JSON")
+    print("🎨 MULTI-GPU RENDER IMAGES FROM TRANSLATED JSON")
     print("=" * 70)
     print(f"Raw frames: {RAW_DIR}")
     print(f"JSON cache: {JSON_DIR}")
     print(f"Output: {OUTPUT_DIR}")
-    print(f"Threads: {RENDER_THREADS}")
+    print(f"GPUs: {NUM_GPUS}")
+    print(f"Threads per GPU: {RENDER_THREADS}")
+    print(f"Total workers: {NUM_GPUS * RENDER_THREADS}")
     print("=" * 70)
     
     # Collect tasks
@@ -197,25 +224,41 @@ def main():
     
     print(f"📦 Found {total} images to render\n")
     
-    # Render with progress bar
-    success_count = 0
+    # Chia tasks cho mỗi GPU
+    import random
+    random.shuffle(tasks)  # Shuffle để load balance tốt hơn
     
-    with ThreadPoolExecutor(max_workers=RENDER_THREADS) as executor:
-        # Submit all tasks
-        futures = {executor.submit(render_image_worker, task): task for task in tasks}
-        
-        # Progress bar
-        with tqdm(total=total, desc="Rendering", unit="img") as pbar:
-            for future in as_completed(futures):
-                if future.result():
-                    success_count += 1
-                pbar.update(1)
+    chunk_size = math.ceil(total / NUM_GPUS)
+    task_chunks = [tasks[i:i + chunk_size] for i in range(0, total, chunk_size)]
+    
+    print(f"📊 Task distribution:")
+    for i, chunk in enumerate(task_chunks):
+        print(f"   GPU {i}: {len(chunk)} images")
+    print()
+    
+    # Spawn processes cho mỗi GPU
+    processes = []
+    for gpu_id in range(min(NUM_GPUS, len(task_chunks))):
+        p = Process(target=gpu_worker, args=(gpu_id, task_chunks[gpu_id]))
+        p.start()
+        processes.append(p)
+    
+    # Wait for all processes
+    for p in processes:
+        p.join()
     
     print("\n" + "=" * 70)
-    print(f"✅ COMPLETED: {success_count}/{total} images rendered")
+    print(f"✅ ALL GPU WORKERS COMPLETED")
     print(f"📁 Output: {OUTPUT_DIR}")
     print("=" * 70)
 
 
 if __name__ == "__main__":
+    # Để multiprocessing hoạt động đúng
+    try:
+        from multiprocessing import set_start_method
+        set_start_method('spawn')
+    except RuntimeError:
+        pass
+    
     main()
