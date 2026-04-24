@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Media Translation Studio</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="logo">
+        <span class="logo-icon">🎬</span>
+        <span class="logo-text">Translation Studio</span>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-tab="video">
+          <span class="nav-icon">🖼️</span>
+          <span>Video Image</span>
+        </button>
+        <button class="nav-item" data-tab="transcript">
+          <span class="nav-icon">📝</span>
+          <span>Transcript</span>
+        </button>
+        <button class="nav-item" data-tab="dubbing">
+          <span class="nav-icon">🎙️</span>
+          <span>Audio Dubbing</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+
+      <!-- ════════════════════ TAB 1: VIDEO TRANSLATION ════════════════════ -->
+      <div id="tab-video" class="tab active">
+        <div class="tab-header">
+          <h1>Video Image Translation</h1>
+          <p>OCR văn bản trong video và dịch sang ngôn ngữ khác</p>
+        </div>
+        <div class="content-grid">
+          <div class="card">
+            <h3>Cấu hình</h3>
+            <form id="video-form">
+              <div class="form-group">
+                <label>File video</label>
+                <div class="file-drop" id="video-drop">
+                  <span class="drop-icon">📹</span>
+                  <span class="drop-text">Kéo thả hoặc click để chọn video</span>
+                  <input type="file" id="video-file" accept="video/*" hidden />
+                </div>
+                <div id="video-filename" class="filename-badge hidden"></div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Ngôn ngữ nguồn</label>
+                  <select name="src_lang" id="v-src-lang">
+                    <option value="german">Tiếng Đức</option>
+                    <option value="chinese">Tiếng Trung</option>
+                    <option value="japanese">Tiếng Nhật</option>
+                    <option value="korean">Tiếng Hàn</option>
+                    <option value="en">Tiếng Anh</option>
+                    <option value="french">Tiếng Pháp</option>
+                  </select>
+                </div>
+                <div class="arrow-icon">→</div>
+                <div class="form-group">
+                  <label>Ngôn ngữ đích</label>
+                  <select name="tgt_lang" id="v-tgt-lang">
+                    <option value="vi">Tiếng Việt</option>
+                    <option value="en">Tiếng Anh</option>
+                    <option value="zh-CN">Tiếng Trung</option>
+                    <option value="ja">Tiếng Nhật</option>
+                    <option value="ko">Tiếng Hàn</option>
+                    <option value="fr">Tiếng Pháp</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>FPS trích xuất</label>
+                  <input type="number" name="fps" value="1" min="0.1" max="30" step="0.1" />
+                  <span class="hint">Frames/giây cần xử lý</span>
+                </div>
+                <div class="form-group">
+                  <label>Số GPU</label>
+                  <input type="number" name="num_gpus" value="1" min="1" max="8" />
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Font chữ (đường dẫn)</label>
+                <input type="text" name="font_path" value="arial.ttf" placeholder="arial.ttf" />
+              </div>
+              <button type="submit" class="btn btn-primary">
+                <span class="btn-icon">▶</span> Bắt đầu dịch
+              </button>
+            </form>
+          </div>
+
+          <div class="card">
+            <h3>Tiến trình</h3>
+            <div class="progress-section" id="video-progress-section">
+              <div class="progress-bar-wrap">
+                <div class="progress-bar" id="video-progress-bar" style="width:0%"></div>
+              </div>
+              <span class="progress-label" id="video-progress-label">Chờ bắt đầu...</span>
+            </div>
+            <div class="log-box" id="video-log">
+              <div class="log-placeholder">Log sẽ hiển thị ở đây...</div>
+            </div>
+            <div id="video-result" class="result-section hidden">
+              <h4>Kết quả</h4>
+              <a id="video-download-link" href="#" class="btn btn-success" download>
+                ⬇ Tải video đã dịch
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════════════════════ TAB 2: TRANSCRIPT ════════════════════ -->
+      <div id="tab-transcript" class="tab">
+        <div class="tab-header">
+          <h1>Transcript Translation</h1>
+          <p>Dịch transcript / phụ đề hoặc transcribe audio rồi dịch</p>
+        </div>
+        <div class="content-grid">
+          <div class="card">
+            <h3>Cấu hình</h3>
+            <form id="transcript-form">
+              <div class="form-group">
+                <label>Chế độ</label>
+                <div class="toggle-group">
+                  <label class="toggle-opt">
+                    <input type="radio" name="mode" value="file" checked onchange="toggleTranscriptMode(this)" />
+                    <span>Upload file transcript</span>
+                  </label>
+                  <label class="toggle-opt">
+                    <input type="radio" name="mode" value="audio" onchange="toggleTranscriptMode(this)" />
+                    <span>Transcribe từ audio</span>
+                  </label>
+                </div>
+              </div>
+
+              <div id="transcript-file-section">
+                <div class="form-group">
+                  <label>File transcript (.txt / .srt)</label>
+                  <div class="file-drop" id="transcript-drop">
+                    <span class="drop-icon">📄</span>
+                    <span class="drop-text">Kéo thả hoặc click để chọn file</span>
+                    <input type="file" id="transcript-file" accept=".txt,.srt,.vtt" hidden />
+                  </div>
+                  <div id="transcript-filename" class="filename-badge hidden"></div>
+                </div>
+              </div>
+
+              <div id="transcript-audio-section" class="hidden">
+                <div class="form-group">
+                  <label>File audio / video</label>
+                  <div class="file-drop" id="transcript-audio-drop">
+                    <span class="drop-icon">🎵</span>
+                    <span class="drop-text">Kéo thả hoặc click để chọn audio</span>
+                    <input type="file" id="transcript-audio-file" accept="audio/*,video/*" hidden />
+                  </div>
+                  <div id="transcript-audio-filename" class="filename-badge hidden"></div>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Ngôn ngữ nguồn</label>
+                  <select id="t-src-lang">
+                    <option value="auto">Tự động nhận diện</option>
+                    <option value="de">Tiếng Đức</option>
+                    <option value="zh">Tiếng Trung</option>
+                    <option value="ja">Tiếng Nhật</option>
+                    <option value="ko">Tiếng Hàn</option>
+                    <option value="en">Tiếng Anh</option>
+                    <option value="fr">Tiếng Pháp</option>
+                  </select>
+                </div>
+                <div class="arrow-icon">→</div>
+                <div class="form-group">
+                  <label>Ngôn ngữ đích</label>
+                  <select id="t-tgt-lang">
+                    <option value="vi">Tiếng Việt</option>
+                    <option value="en">Tiếng Anh</option>
+                    <option value="zh-CN">Tiếng Trung</option>
+                    <option value="ja">Tiếng Nhật</option>
+                    <option value="ko">Tiếng Hàn</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Định dạng xuất</label>
+                <div class="toggle-group">
+                  <label class="toggle-opt">
+                    <input type="radio" name="out_format" value="txt" checked />
+                    <span>.TXT</span>
+                  </label>
+                  <label class="toggle-opt">
+                    <input type="radio" name="out_format" value="srt" />
+                    <span>.SRT (phụ đề)</span>
+                  </label>
+                </div>
+              </div>
+              <button type="submit" class="btn btn-primary">
+                <span class="btn-icon">▶</span> Bắt đầu dịch
+              </button>
+            </form>
+          </div>
+
+          <div class="card">
+            <h3>Tiến trình</h3>
+            <div class="progress-section">
+              <div class="progress-bar-wrap">
+                <div class="progress-bar" id="transcript-progress-bar" style="width:0%"></div>
+              </div>
+              <span class="progress-label" id="transcript-progress-label">Chờ bắt đầu...</span>
+            </div>
+            <div class="log-box" id="transcript-log">
+              <div class="log-placeholder">Log sẽ hiển thị ở đây...</div>
+            </div>
+            <div id="transcript-result" class="result-section hidden">
+              <h4>Kết quả</h4>
+              <div id="transcript-preview" class="preview-box"></div>
+              <a id="transcript-download-link" href="#" class="btn btn-success" download>
+                ⬇ Tải file đã dịch
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════════════════════ TAB 3: AUDIO DUBBING ════════════════════ -->
+      <div id="tab-dubbing" class="tab">
+        <div class="tab-header">
+          <h1>Audio Dubbing (ElevenLabs)</h1>
+          <p>Cắt audio và lồng tiếng tự động bằng ElevenLabs AI Dubbing</p>
+        </div>
+        <div class="content-grid">
+          <div class="card">
+            <h3>Cấu hình</h3>
+            <form id="dubbing-form">
+              <div class="form-group">
+                <label>File audio / video</label>
+                <div class="file-drop" id="dubbing-drop">
+                  <span class="drop-icon">🎙️</span>
+                  <span class="drop-text">Kéo thả hoặc click để chọn file</span>
+                  <input type="file" id="dubbing-file" accept="audio/*,video/*" hidden />
+                </div>
+                <div id="dubbing-filename" class="filename-badge hidden"></div>
+              </div>
+
+              <div class="form-group">
+                <label>ElevenLabs API Key</label>
+                <div class="api-key-wrap">
+                  <input type="password" id="elevenlabs-key" placeholder="sk_..." />
+                  <button type="button" class="btn-eye" onclick="toggleKeyVisibility()">👁</button>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Ngôn ngữ nguồn</label>
+                  <select id="d-src-lang">
+                    <option value="en">Tiếng Anh</option>
+                    <option value="de">Tiếng Đức</option>
+                    <option value="zh">Tiếng Trung</option>
+                    <option value="ja">Tiếng Nhật</option>
+                    <option value="ko">Tiếng Hàn</option>
+                    <option value="fr">Tiếng Pháp</option>
+                    <option value="es">Tiếng Tây Ban Nha</option>
+                  </select>
+                </div>
+                <div class="arrow-icon">→</div>
+                <div class="form-group">
+                  <label>Ngôn ngữ đích</label>
+                  <select id="d-tgt-lang">
+                    <option value="vi">Tiếng Việt</option>
+                    <option value="en">Tiếng Anh</option>
+                    <option value="zh">Tiếng Trung</option>
+                    <option value="ja">Tiếng Nhật</option>
+                    <option value="ko">Tiếng Hàn</option>
+                    <option value="fr">Tiếng Pháp</option>
+                    <option value="es">Tiếng Tây Ban Nha</option>
+                    <option value="de">Tiếng Đức</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Cắt đoạn audio (để trống = dùng toàn bộ)</label>
+                <div class="form-row time-row">
+                  <div class="form-group">
+                    <label class="sublabel">Bắt đầu (giây)</label>
+                    <input type="number" id="start-time" value="0" min="0" step="0.1" placeholder="0" />
+                  </div>
+                  <div class="arrow-icon">—</div>
+                  <div class="form-group">
+                    <label class="sublabel">Kết thúc (giây)</label>
+                    <input type="number" id="end-time" value="0" min="0" step="0.1" placeholder="0 = hết" />
+                  </div>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Số người nói (0 = tự động)</label>
+                <input type="number" id="num-speakers" value="0" min="0" max="20" />
+              </div>
+
+              <div class="info-box">
+                <span>ℹ️</span>
+                <span>ElevenLabs Dubbing sẽ giữ nguyên giọng gốc và dịch sang ngôn ngữ đích. Thời gian xử lý phụ thuộc vào độ dài audio.</span>
+              </div>
+
+              <button type="submit" class="btn btn-primary">
+                <span class="btn-icon">▶</span> Bắt đầu Dubbing
+              </button>
+            </form>
+          </div>
+
+          <div class="card">
+            <h3>Tiến trình</h3>
+            <div class="progress-section">
+              <div class="progress-bar-wrap">
+                <div class="progress-bar" id="dubbing-progress-bar" style="width:0%"></div>
+              </div>
+              <span class="progress-label" id="dubbing-progress-label">Chờ bắt đầu...</span>
+            </div>
+            <div class="log-box" id="dubbing-log">
+              <div class="log-placeholder">Log sẽ hiển thị ở đây...</div>
+            </div>
+            <div id="dubbing-result" class="result-section hidden">
+              <h4>Kết quả</h4>
+              <audio id="dubbing-audio-player" controls class="audio-player"></audio>
+              <a id="dubbing-download-link" href="#" class="btn btn-success" download>
+                ⬇ Tải audio đã dub
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
