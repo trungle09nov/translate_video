@@ -1,8 +1,8 @@
 web/
 .venv/
 data_translate
-frame_raw
-frame_done
+frames_raw
+frames_done
 json_cache
 model_cache
 output
