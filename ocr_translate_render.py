@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 from deep_translator import GoogleTranslator
 
 # ================= CẤU HÌNH PHẦN CỨNG =================
-NUM_GPUS = 4
+NUM_GPUS = 2
 BATCH_SIZE_OCR = 32  # Giảm lại để ổn định
 TRANSLATE_BATCH_SIZE = 50  # Tăng translate batch
 RENDER_THREADS = 4  # Số thread cho rendering song song

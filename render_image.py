@@ -14,7 +14,7 @@ JSON_DIR = "./json_cache"        # JSON đã dịch
 OUTPUT_DIR = "./frames_done"     # Frames output
 FONT_PATH = "arial.ttf"
 RENDER_THREADS = 8               # Threads per GPU
-NUM_GPUS = 4                     # Số GPU
+NUM_GPUS = 2                     # Số GPU
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
