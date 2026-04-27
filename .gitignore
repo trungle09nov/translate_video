@@ -11,3 +11,5 @@ data
 *.mp3
 *.mp4
 *.avi
+.env
+FFmpeg
