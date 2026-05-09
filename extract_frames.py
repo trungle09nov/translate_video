@@ -2,6 +2,7 @@ import os
 import subprocess
 import shutil
 import json
+from pipeline_config import EXTRACT_FPS
 
 VIDEO_FOLDER = "data"                   # Thư mục chứa các file video
 OUTPUT_ROOT = "frames_raw"     # Thư mục gốc để chứa frames
@@ -37,19 +38,39 @@ def extract_frames_for_video(video_path):
 
     # Lấy FPS chuẩn
     fps_fraction = get_video_fps_fraction(video_path)
-    print(f"🎥 {filename}: FPS = {fps_fraction}")
+    if EXTRACT_FPS == "source":
+        extract_fps = fps_fraction
+    else:
+        extract_fps = str(EXTRACT_FPS)
+
+    print(f"🎥 {filename}: source FPS = {fps_fraction}")
+    print(f"🧪 Extract FPS = {extract_fps}")
 
     print(f"🚀 Đang tách frame -> {output_folder}")
 
     cmd = [
         "ffmpeg", "-i", video_path,
-        "-vf", "fps=1",
+        "-vf", f"fps={extract_fps}",
         "-vsync", "vfr",
         "-q:v", "2",
         f"{output_folder}/frame_%06d.jpg"
     ]
 
     subprocess.run(cmd)
+
+    # Lưu metadata để bước assemble dùng cùng tốc độ đọc frame.
+    meta_path = os.path.join(output_folder, "_extract_meta.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "source_fps": fps_fraction,
+                "extract_fps": extract_fps,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
     print(f"✅ Hoàn tất {filename}\n")
 
 def process_all_videos():

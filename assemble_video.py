@@ -1,5 +1,7 @@
 import subprocess
 import os
+import json
+from pipeline_config import ASSEMBLE_OUTPUT_FPS_MODE
 
 FRAMES_ROOT = "./frames_done"      # Frames đã dịch
 VIDEO_ROOT = "./data"              # Video gốc (có audio)
@@ -43,6 +45,50 @@ def count_frames_in_dir(frames_dir):
     return len([f for f in os.listdir(frames_dir) if f.endswith('.jpg')])
 
 
+def parse_fps_fraction(fps_fraction):
+    try:
+        if "/" in fps_fraction:
+            n, d = fps_fraction.split("/", 1)
+            n = float(n)
+            d = float(d)
+            if d == 0:
+                return 0.0
+            return n / d
+        return float(fps_fraction)
+    except Exception:
+        return 0.0
+
+
+def get_extract_meta(frames_dir):
+    meta_path = os.path.join(frames_dir, "_extract_meta.json")
+    if not os.path.exists(meta_path):
+        return None
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def choose_output_fps(source_fps_fraction, extract_fps_fraction):
+    mode = ASSEMBLE_OUTPUT_FPS_MODE
+    if mode == "source":
+        return source_fps_fraction
+    if mode == "extracted":
+        return extract_fps_fraction
+
+    # auto mode
+    src = parse_fps_fraction(source_fps_fraction)
+    ext = parse_fps_fraction(extract_fps_fraction)
+    if src <= 0 or ext <= 0:
+        return source_fps_fraction
+
+    if abs(src - ext) <= 0.01:
+        return source_fps_fraction
+    return extract_fps_fraction
+
+
 def assemble_video_for_folder(subdir):
     frames_dir = os.path.join(FRAMES_ROOT, subdir)
     video_source = os.path.join(VIDEO_ROOT, f"{subdir}.mp4")
@@ -56,27 +102,35 @@ def assemble_video_for_folder(subdir):
         print(f"⚠️  Không có thư mục frames: {frames_dir}")
         return
 
-    # Lấy thông tin video gốc
+    # Lấy thông tin video gốc + metadata extract
     fps_fraction = get_video_fps_fraction(video_source)
+    meta = get_extract_meta(frames_dir)
+    extract_fps_fraction = fps_fraction
+    if meta:
+        extract_fps_fraction = str(meta.get("extract_fps", fps_fraction))
+
+    output_fps_fraction = choose_output_fps(fps_fraction, extract_fps_fraction)
     duration = get_video_duration(video_source)
     num_frames = count_frames_in_dir(frames_dir)
     
     print(f"🎬 Ghép video: {subdir}")
     print(f"   FPS gốc: {fps_fraction}")
+    print(f"   FPS tách frame: {extract_fps_fraction}")
+    print(f"   FPS output: {output_fps_fraction} (mode: {ASSEMBLE_OUTPUT_FPS_MODE})")
     print(f"   Duration: {duration:.2f}s")
     print(f"   Frames: {num_frames}")
 
-    # ✅ Ghép: frames (1fps) → video (fps gốc) + audio gốc
+    # ✅ Ghép: frames -> video + audio gốc, đọc frames đúng FPS đã tách
     cmd = [
         "ffmpeg", "-y",
-        "-framerate", "1",                       # ✅ Đọc frames với 1 fps
+        "-framerate", extract_fps_fraction,
         "-i", f"{frames_dir}/frame_%06d.jpg",   # Input: frames đã dịch
         "-i", video_source,                      # Input: video gốc (lấy audio)
         "-c:v", "libx264",                       # Codec video
         "-preset", "medium",                     # Preset encode
         "-crf", "23",                            # Chất lượng (18-28, thấp = chất lượng cao)
         "-pix_fmt", "yuv420p",                   # Format tương thích
-        "-r", fps_fraction,                      # ✅ Output FPS = FPS gốc
+        "-r", output_fps_fraction,
         "-map", "0:v:0",                         # Map video từ frames
         "-map", "1:a:0?",                        # Map audio từ video gốc (? = optional)
         "-c:a", "aac",                           # Encode audio
