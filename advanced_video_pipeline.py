@@ -71,15 +71,30 @@ class AdvancedVideoInplaceTranslator:
         try:
             from paddleocr import PaddleOCR
 
-            return PaddleOCR(
-                lang=self.src_lang or ADV_OCR_LANG,
-                use_angle_cls=True,
-                det_db_unclip_ratio=1.4,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                show_log=False,
-            )
+            common_kwargs = {
+                "lang": self.src_lang or ADV_OCR_LANG,
+                "use_angle_cls": True,
+                "det_db_unclip_ratio": 1.4,
+                "show_log": False,
+            }
+            try:
+                return PaddleOCR(
+                    **common_kwargs,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                )
+            except TypeError:
+                # PaddleOCR 2.x does not have the PaddleX document-preprocessor args.
+                return PaddleOCR(**common_kwargs)
         except Exception as exc:
+            msg = str(exc)
+            if "libtorch_cuda.so" in msg or "ncclCommWindowDeregister" in msg:
+                raise RuntimeError(
+                    "Cannot initialize PaddleOCR because PaddleOCR imported torch via "
+                    "PaddleX/ModelScope and the installed torch CUDA/NCCL libraries are "
+                    "incompatible. Install the pinned OCR dependency set with "
+                    "`pip install -U \"paddleocr>=2.8.0,<3.0.0\"`, then rerun."
+                ) from exc
             raise RuntimeError(f"Cannot initialize PaddleOCR: {exc}") from exc
 
     def _init_translator(self):
@@ -320,7 +335,10 @@ class AdvancedVideoInplaceTranslator:
             return None, None
 
     def run_keyframe_ocr(self, frame: np.ndarray) -> List[OCRTextItem]:
-        result = self.ocr_engine.predict(frame)
+        if hasattr(self.ocr_engine, "predict"):
+            result = self.ocr_engine.predict(frame)
+        else:
+            result = self.ocr_engine.ocr(frame, cls=True)
         items: List[OCRTextItem] = []
 
         if not result or not result[0]:

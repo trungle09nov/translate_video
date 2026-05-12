@@ -6,17 +6,16 @@
 4. render image after translate
 5. assemble video
 
-## Advanced Video In-place Translation (new)
+## Advanced Frame In-place Translation
 
 This repo now includes an advanced pipeline entrypoint: `advanced_video_pipeline.py`.
 
 Pipeline:
-- Scene Detection (PySceneDetect)
-- Keyframe OCR per scene (PaddleOCR)
-- SAM-2 mask propagation (optional)
+- Per-frame OCR (PaddleOCR)
+- SAM-2 image mask refinement (optional)
 - LaMa inpainting (optional)
 - Typography style extraction
-- Dynamic text rendering from propagated masks
+- Dynamic text rendering
 
 ### 1) Install dependencies
 
@@ -24,7 +23,7 @@ Pipeline:
 pip install -r requirements_advanced.txt
 ```
 
-For SAM-2 video propagation (optional but recommended):
+For SAM-2 image mask refinement (optional):
 
 ```bash
 git clone https://github.com/facebookresearch/segment-anything-2.git
@@ -36,7 +35,6 @@ pip install -e .
 
 ```bash
 python advanced_video_pipeline.py \
-	--video data/video.mp4 \
 	--frames-dir frames_raw/video_name \
 	--output-dir frames_done/video_name \
 	--src-lang german \
@@ -48,7 +46,6 @@ python advanced_video_pipeline.py \
 
 ```bash
 python advanced_video_pipeline.py \
-	--video data/video.mp4 \
 	--frames-dir frames_raw/video_name \
 	--output-dir frames_done/video_name \
 	--src-lang german \

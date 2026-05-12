@@ -5,11 +5,11 @@ Pillow
 
 # OCR + translation
 paddlepaddle-gpu
-paddleocr>=2.8.0
+# Keep PaddleOCR on the legacy 2.x API. PaddleOCR 3.x pulls PaddleX/ModelScope,
+# which imports torch at module import time and can fail on CUDA/NCCL mismatches
+# before OCR is even initialized.
+paddleocr>=2.8.0,<3.0.0
 deep-translator
-
-# Scene detection
-scenedetect[opencv]
 
 # Optional: typography clustering
 scikit-learn
