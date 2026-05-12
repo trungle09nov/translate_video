@@ -19,3 +19,14 @@ EXTRACT_FPS = 5
 # - "source": always force source FPS (can duplicate frames if extracted lower).
 # - "extracted": keep extracted FPS.
 ASSEMBLE_OUTPUT_FPS_MODE = "auto"
+
+# Advanced in-place translation pipeline config.
+ADV_SCENE_THRESHOLD = 27.0
+ADV_MIN_SCENE_LEN = 12
+ADV_OCR_LANG = "german"
+ADV_OCR_SCORE_THRESHOLD = 0.25
+ADV_MASK_EXPAND_PX = 3
+ADV_RENDER_PADDING_PX = 4
+ADV_TEXT_OVERFLOW_RATIO = 1.1
+ADV_USE_SAM2 = True
+ADV_USE_LAMA = False

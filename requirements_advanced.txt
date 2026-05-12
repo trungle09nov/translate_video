@@ -1,0 +1,23 @@
+# Core
+numpy
+opencv-python
+Pillow
+
+# OCR + translation
+paddlepaddle-gpu
+paddleocr>=2.8.0
+deep-translator
+
+# Scene detection
+scenedetect[opencv]
+
+# Optional: typography clustering
+scikit-learn
+
+# Optional: SAM-2 (install from source)
+# git clone https://github.com/facebookresearch/segment-anything-2.git
+# cd segment-anything-2
+# pip install -e .
+
+# Optional: LaMa inpainting engine
+lama-cleaner

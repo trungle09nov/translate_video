@@ -254,6 +254,32 @@ def render_text_in_box(draw, translated, font_path, x_min, y_min, x_max, y_max, 
         current_y += line_height + spacing
 
 
+def save_image_atomic(img_pil, out_path, quality=95):
+    """Ghi ảnh ra file tạm rồi replace để tránh output bị hỏng nếu chương trình dừng giữa chừng."""
+    out_dir = os.path.dirname(out_path)
+    temp_path = os.path.join(out_dir, f".{os.path.basename(out_path)}.tmp")
+    ext = os.path.splitext(out_path)[1].lower()
+    format_name = {
+        ".jpg": "JPEG",
+        ".jpeg": "JPEG",
+        ".png": "PNG",
+    }.get(ext)
+
+    if format_name is None:
+        img_pil.save(temp_path)
+    else:
+        img_pil.save(temp_path, format=format_name, quality=quality)
+    os.replace(temp_path, out_path)
+
+
+def copy_file_atomic(src_path, out_path):
+    """Copy file ra file tạm rồi replace để resume an toàn hơn."""
+    out_dir = os.path.dirname(out_path)
+    temp_path = os.path.join(out_dir, f".{os.path.basename(out_path)}.tmp")
+    shutil.copy(src_path, temp_path)
+    os.replace(temp_path, out_path)
+
+
 # ================= RENDER WORKER =================
 def render_image_worker(task):
     """Render 1 ảnh từ JSON"""
@@ -263,7 +289,7 @@ def render_image_worker(task):
         # Kiểm tra JSON có tồn tại không
         if not os.path.exists(json_path):
             # Không có JSON → copy ảnh gốc
-            shutil.copy(img_path, out_path)
+            copy_file_atomic(img_path, out_path)
             return True
         
         # Load JSON
@@ -274,7 +300,7 @@ def render_image_worker(task):
         
         # Không có text → copy ảnh gốc
         if len(ocr_data) == 0:
-            shutil.copy(img_path, out_path)
+            copy_file_atomic(img_path, out_path)
             return True
         
         # Load ảnh bằng OpenCV để xử lý inpainting nền
@@ -341,7 +367,7 @@ def render_image_worker(task):
             render_text_in_box(draw, translated, FONT_PATH, x1, y1, x2, y2, color)
 
         # Save
-        img_pil.save(out_path, quality=95)
+        save_image_atomic(img_pil, out_path, quality=95)
         return True
         
     except Exception as e:
