@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Advanced in-place video translation pipeline.
+"""Advanced in-place frame/image translation pipeline.
 
 Pipeline stages:
-1) Scene detection (PySceneDetect)
-2) Keyframe OCR (first frame of each scene)
-3) Optional SAM-2 mask propagation
-4) Inpainting (LaMa or OpenCV fallback)
-5) Typography extraction and dynamic text rendering
+1) Per-frame OCR
+2) Optional SAM-2 image mask refinement
+3) Inpainting (LaMa or OpenCV fallback)
+4) Typography extraction and dynamic text rendering
 
 This module is designed to be additive and does not break existing scripts.
 """
@@ -25,22 +24,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from pipeline_config import (
-    ADV_MASK_EXPAND_PX,
-    ADV_MIN_SCENE_LEN,
     ADV_OCR_LANG,
     ADV_OCR_SCORE_THRESHOLD,
     ADV_RENDER_PADDING_PX,
-    ADV_SCENE_THRESHOLD,
     ADV_TEXT_OVERFLOW_RATIO,
     ADV_USE_LAMA,
     ADV_USE_SAM2,
 )
-
-
-@dataclass
-class SceneSpan:
-    start_idx: int
-    end_idx: int
 
 
 @dataclass
@@ -74,7 +64,6 @@ class AdvancedVideoInplaceTranslator:
 
         self.ocr_engine = self._init_ocr()
         self.translator = self._init_translator()
-        self.sam2_predictor = self._init_sam2_predictor()
         self.sam2_image_predictor = self._init_sam2_image_predictor()
         self.lama_engine, self.lama_cfg = self._init_lama_engine()
 
@@ -273,20 +262,6 @@ class AdvancedVideoInplaceTranslator:
 
         return items
 
-    def _init_sam2_predictor(self):
-        if not self.use_sam2:
-            return None
-        if not self.sam2_checkpoint or not self.sam2_cfg:
-            print("[WARN] SAM-2 disabled: missing checkpoint/config path")
-            return None
-        try:
-            from sam2.build_sam import build_sam2_video_predictor
-
-            return build_sam2_video_predictor(self.sam2_cfg, self.sam2_checkpoint)
-        except Exception as exc:
-            print(f"[WARN] SAM-2 disabled: {exc}")
-            return None
-
     def _init_sam2_image_predictor(self):
         if not self.use_sam2:
             return None
@@ -344,39 +319,6 @@ class AdvancedVideoInplaceTranslator:
             print(f"[WARN] LaMa disabled: {exc}")
             return None, None
 
-    def detect_scenes(self, video_path: Optional[str], frame_count: int) -> List[SceneSpan]:
-        if not video_path or not Path(video_path).exists():
-            return [SceneSpan(0, max(0, frame_count - 1))]
-
-        try:
-            from scenedetect import SceneManager, open_video
-            from scenedetect.detectors import ContentDetector
-
-            video = open_video(video_path)
-            manager = SceneManager()
-            manager.add_detector(
-                ContentDetector(
-                    threshold=ADV_SCENE_THRESHOLD,
-                    min_scene_len=ADV_MIN_SCENE_LEN,
-                )
-            )
-            manager.detect_scenes(video)
-            scenes = manager.get_scene_list()
-            if not scenes:
-                return [SceneSpan(0, max(0, frame_count - 1))]
-
-            spans: List[SceneSpan] = []
-            for start_tc, end_tc in scenes:
-                start_idx = max(0, int(start_tc.get_frames()))
-                end_idx = min(frame_count - 1, int(end_tc.get_frames()) - 1)
-                if end_idx >= start_idx:
-                    spans.append(SceneSpan(start_idx, end_idx))
-
-            return spans or [SceneSpan(0, max(0, frame_count - 1))]
-        except Exception as exc:
-            print(f"[WARN] Scene detection fallback to single scene: {exc}")
-            return [SceneSpan(0, max(0, frame_count - 1))]
-
     def run_keyframe_ocr(self, frame: np.ndarray) -> List[OCRTextItem]:
         result = self.ocr_engine.predict(frame)
         items: List[OCRTextItem] = []
@@ -431,145 +373,32 @@ class AdvancedVideoInplaceTranslator:
         for item in items:
             item.translated = text_map.get(item.text, item.text)
 
-    def _box_to_mask(self, shape: Tuple[int, int], box: Tuple[int, int, int, int]) -> np.ndarray:
+    def _render_mask_for_item(
+        self,
+        shape: Tuple[int, int],
+        item: OCRTextItem,
+        translated_text: Optional[str] = None,
+    ) -> np.ndarray:
         h, w = shape
-        x1, y1, x2, y2 = box
-        x1 = max(0, x1 - ADV_MASK_EXPAND_PX)
-        y1 = max(0, y1 - ADV_MASK_EXPAND_PX)
-        x2 = min(w - 1, x2 + ADV_MASK_EXPAND_PX)
-        y2 = min(h - 1, y2 + ADV_MASK_EXPAND_PX)
+        x1, y1, x2, y2 = item.box
+        box_w = max(1, x2 - x1)
+        text = (translated_text if translated_text is not None else item.translated) or ""
+
+        # Translated Vietnamese is often longer than the source text. Keep a stable
+        # render area based on the OCR layout box, with modest horizontal breathing room.
+        source_len = max(1, len(item.text.strip()))
+        overflow = max(1.0, min(ADV_TEXT_OVERFLOW_RATIO, len(text.strip()) / source_len))
+        extra_x = int(round((overflow - 1.0) * box_w * 0.5)) + ADV_RENDER_PADDING_PX
+
+        x1 = max(0, x1 - extra_x)
+        x2 = min(w - 1, x2 + extra_x)
+        y1 = max(0, y1 - ADV_RENDER_PADDING_PX)
+        y2 = min(h - 1, y2 + ADV_RENDER_PADDING_PX)
+
         mask = np.zeros((h, w), dtype=np.uint8)
-        mask[y1 : y2 + 1, x1 : x2 + 1] = 255
+        if x2 > x1 and y2 > y1:
+            mask[y1 : y2 + 1, x1 : x2 + 1] = 255
         return mask
-
-    def _fallback_propagate(
-        self,
-        scenes: List[SceneSpan],
-        scene_items: Dict[int, List[OCRTextItem]],
-        frame_shape: Tuple[int, int],
-    ) -> Dict[int, List[Tuple[OCRTextItem, np.ndarray]]]:
-        frame_to_masks: Dict[int, List[Tuple[OCRTextItem, np.ndarray]]] = {}
-        for scene_idx, span in enumerate(scenes):
-            items = scene_items.get(scene_idx, [])
-            for frame_idx in range(span.start_idx, span.end_idx + 1):
-                frame_to_masks.setdefault(frame_idx, [])
-                for item in items:
-                    frame_to_masks[frame_idx].append((item, self._box_to_mask(frame_shape, item.box)))
-        return frame_to_masks
-
-    def _clean_fragmented_mask(self, mask: np.ndarray) -> np.ndarray:
-        """Keep the dominant component when SAM mask is overly fragmented."""
-        binary = (mask > 0).astype(np.uint8)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        if num_labels <= 2:
-            return binary * 255
-
-        # Ignore background (label 0), inspect fragmentation level.
-        component_areas = stats[1:, cv2.CC_STAT_AREA]
-        if component_areas.size < 4:
-            return binary * 255
-
-        largest_label = 1 + int(np.argmax(component_areas))
-        largest_mask = (labels == largest_label).astype(np.uint8) * 255
-        return largest_mask
-
-    def _propagate_masks_single_scene(
-        self,
-        video_path: str,
-        scene_idx: int,
-        span: SceneSpan,
-        items: List[OCRTextItem],
-        frame_shape: Tuple[int, int],
-    ) -> Dict[int, List[Tuple[OCRTextItem, np.ndarray]]]:
-        if self.sam2_predictor is None or not items:
-            return self._fallback_propagate([span], {0: items}, frame_shape)
-
-        import torch
-
-        scene_masks: Dict[int, List[Tuple[OCRTextItem, np.ndarray]]] = {}
-        inference_state = self.sam2_predictor.init_state(video_path=video_path)
-        obj_meta: Dict[int, OCRTextItem] = {}
-
-        try:
-            for obj_id, item in enumerate(items):
-                box = np.array(item.box, dtype=np.float32)
-                self.sam2_predictor.add_new_points_or_box(
-                    inference_state=inference_state,
-                    frame_idx=span.start_idx,
-                    obj_id=obj_id,
-                    box=box,
-                )
-                obj_meta[obj_id] = item
-
-            for frame_idx, out_obj_ids, out_mask_logits in self.sam2_predictor.propagate_in_video(inference_state):
-                frame_idx = int(frame_idx)
-                if frame_idx < span.start_idx or frame_idx > span.end_idx:
-                    continue
-
-                scene_masks.setdefault(frame_idx, [])
-                for idx, current_obj_id in enumerate(out_obj_ids):
-                    current_obj_id = int(current_obj_id)
-                    if current_obj_id not in obj_meta:
-                        continue
-
-                    logits = out_mask_logits[idx]
-                    # Screen-recording text is often thin; threshold 0.0 preserves fine strokes.
-                    if isinstance(logits, torch.Tensor):
-                        mask = (logits > 0.0).detach().cpu().numpy().astype(np.uint8) * 255
-                    else:
-                        mask = (np.array(logits) > 0.0).astype(np.uint8) * 255
-
-                    if mask.ndim == 3:
-                        mask = mask[0]
-                    mask = self._clean_fragmented_mask(mask)
-                    scene_masks[frame_idx].append((obj_meta[current_obj_id], mask))
-
-            return scene_masks
-        finally:
-            # Release scene state to avoid accumulating VRAM across long videos.
-            del inference_state
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
-
-    def propagate_masks(
-        self,
-        video_path: Optional[str],
-        scenes: List[SceneSpan],
-        scene_items: Dict[int, List[OCRTextItem]],
-        frame_shape: Tuple[int, int],
-    ) -> Dict[int, List[Tuple[OCRTextItem, np.ndarray]]]:
-        if self.sam2_predictor is None or not video_path:
-            return self._fallback_propagate(scenes, scene_items, frame_shape)
-
-        try:
-            frame_to_masks: Dict[int, List[Tuple[OCRTextItem, np.ndarray]]] = {}
-            for scene_idx, span in enumerate(scenes):
-                items = scene_items.get(scene_idx, [])
-                if not items:
-                    continue
-
-                scene_result = self._propagate_masks_single_scene(
-                    video_path=video_path,
-                    scene_idx=scene_idx,
-                    span=span,
-                    items=items,
-                    frame_shape=frame_shape,
-                )
-                for frame_idx, entries in scene_result.items():
-                    frame_to_masks.setdefault(frame_idx, []).extend(entries)
-
-            # Fill missing frames with static box masks.
-            fallback = self._fallback_propagate(scenes, scene_items, frame_shape)
-            for f_idx, entries in fallback.items():
-                if not frame_to_masks.get(f_idx):
-                    frame_to_masks[f_idx] = entries
-
-            return frame_to_masks
-        except Exception as exc:
-            print(f"[WARN] SAM-2 propagation failed, fallback to static masks: {exc}")
-            return self._fallback_propagate(scenes, scene_items, frame_shape)
 
     def inpaint_frame(self, frame: np.ndarray, merged_mask: np.ndarray) -> np.ndarray:
         if merged_mask.max() == 0:
@@ -730,17 +559,85 @@ class AdvancedVideoInplaceTranslator:
         }
         json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    @staticmethod
+    def _collect_frame_paths(frames_dir: str) -> List[Path]:
+        frame_dir = Path(frames_dir)
+        paths: List[Path] = []
+        for suffix in ("*.jpg", "*.jpeg", "*.png"):
+            paths.extend(frame_dir.glob(suffix))
+            paths.extend(frame_dir.glob(suffix.upper()))
+        return sorted(set(paths), key=lambda p: p.name)
+
+    def _prepare_frame_items(
+        self,
+        frame: np.ndarray,
+        frame_shape: Tuple[int, int, int],
+        apply_temporal_smoothing: bool,
+        raw_items: Optional[List[OCRTextItem]] = None,
+    ) -> List[OCRTextItem]:
+        h, w = frame_shape[:2]
+        items = raw_items if raw_items is not None else self.run_keyframe_ocr(frame)
+
+        refined_items: List[OCRTextItem] = []
+        for item in items:
+            clipped = self._clip_box(item.box, w, h)
+            if clipped is None:
+                continue
+            item.box = self.refine_box_with_contours(frame, clipped)
+            if not self._filter_layout_box(item.box, frame_shape, item.confidence):
+                continue
+            refined_items.append(item)
+
+        refined_items = self._align_boxes_by_baseline(refined_items, tolerance_px=5)
+        if apply_temporal_smoothing:
+            refined_items = self._apply_temporal_smoothing(refined_items)
+        return refined_items
+
+    def _render_frame(
+        self,
+        frame: np.ndarray,
+        mask_entries: List[Tuple[OCRTextItem, np.ndarray]],
+    ) -> np.ndarray:
+        h, w = frame.shape[:2]
+        if not mask_entries:
+            return frame
+
+        merged_mask = np.zeros((h, w), dtype=np.uint8)
+        render_entries: List[Tuple[OCRTextItem, np.ndarray]] = []
+
+        for item, raw_mask in mask_entries:
+            inpaint_mask = raw_mask.astype(np.uint8)
+            if inpaint_mask.shape[:2] != (h, w):
+                inpaint_mask = cv2.resize(inpaint_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+
+            tight = self.get_tight_box_from_mask(inpaint_mask)
+            if tight is not None:
+                clipped_tight = self._clip_box(tight, w, h)
+                if clipped_tight is not None:
+                    x1, y1, x2, y2 = item.box
+                    tx1, ty1, tx2, ty2 = clipped_tight
+                    item.box = (min(x1, tx1), min(y1, ty1), max(x2, tx2), max(y2, ty2))
+
+            inpaint_mask = cv2.dilate(inpaint_mask, np.ones((3, 3), dtype=np.uint8), iterations=1)
+            item.style = self.extract_visual_style(frame, inpaint_mask)
+            render_mask = self._render_mask_for_item((h, w), item)
+
+            merged_mask = np.maximum(merged_mask, inpaint_mask)
+            render_entries.append((item, render_mask))
+
+        clean = self.inpaint_frame(frame, merged_mask)
+        for item, render_mask in render_entries:
+            clean = self.render_text_on_mask(clean, item.translated, render_mask, item.style)
+        return clean
+
     def process(
         self,
-        video_path: Optional[str],
         frames_dir: str,
         output_dir: str,
         json_dir: Optional[str] = None,
         skip_render: bool = False,
-    ) -> Dict[str, int]:
-        frame_paths = sorted(Path(frames_dir).glob("*.jpg"))
-        if not frame_paths:
-            frame_paths = sorted(Path(frames_dir).glob("*.png"))
+    ) -> Dict[str, Any]:
+        frame_paths = self._collect_frame_paths(frames_dir)
         if not frame_paths:
             raise ValueError(f"No frames found in {frames_dir}")
 
@@ -748,35 +645,22 @@ class AdvancedVideoInplaceTranslator:
         if json_dir:
             os.makedirs(json_dir, exist_ok=True)
 
-        first_frame = cv2.imread(str(frame_paths[0]))
-        if first_frame is None:
-            raise ValueError(f"Cannot read frame {frame_paths[0]}")
-        h, w = first_frame.shape[:2]
-
         rendered = 0
         ocr_boxes_total = 0
         kept_boxes_total = 0
-        for idx, frame_path in enumerate(frame_paths):
+        for frame_path in frame_paths:
             frame = cv2.imread(str(frame_path))
             if frame is None:
                 continue
 
-            items = self.run_keyframe_ocr(frame)
-            ocr_boxes_total += len(items)
-
-            # Refine OCR boxes with contour tightening, then align nearby baselines.
-            refined_items: List[OCRTextItem] = []
-            for item in items:
-                clipped = self._clip_box(item.box, w, h)
-                if clipped is None:
-                    continue
-                item.box = self.refine_box_with_contours(frame, clipped)
-                if not self._filter_layout_box(item.box, frame.shape, item.confidence):
-                    continue
-                refined_items.append(item)
-
-            refined_items = self._align_boxes_by_baseline(refined_items, tolerance_px=5)
-            refined_items = self._apply_temporal_smoothing(refined_items)
+            raw_items = self.run_keyframe_ocr(frame)
+            ocr_boxes_total += len(raw_items)
+            refined_items = self._prepare_frame_items(
+                frame,
+                frame.shape,
+                apply_temporal_smoothing=True,
+                raw_items=raw_items,
+            )
             kept_boxes_total += len(refined_items)
 
             self.translate_items(refined_items)
@@ -795,41 +679,22 @@ class AdvancedVideoInplaceTranslator:
                 sam_refined_box, sam_mask = self._refine_box_with_sam_prompt(frame, item.box)
                 item.box = sam_refined_box
                 obj_mask = sam_mask if sam_mask is not None else self._build_text_mask_from_box(frame, item.box)
-                tight = self.get_tight_box_from_mask(obj_mask)
-                if tight is not None:
-                    clipped_tight = self._clip_box(tight, w, h)
-                    if clipped_tight is not None:
-                        item.box = clipped_tight
-                # Expand a little for anti-aliasing cleanup before inpaint.
-                obj_mask = cv2.dilate(obj_mask, np.ones((3, 3), dtype=np.uint8), iterations=1)
-                item.style = self.extract_visual_style(frame, obj_mask)
                 mask_entries.append((item, obj_mask))
 
-            if not mask_entries:
-                self.prev_frame_items = self._snapshot_items(refined_items)
-                cv2.imwrite(str(Path(output_dir) / frame_path.name), frame)
-                continue
-
-            merged_mask = np.zeros((h, w), dtype=np.uint8)
-            for _, m in mask_entries:
-                merged_mask = np.maximum(merged_mask, m.astype(np.uint8))
-
-            clean = self.inpaint_frame(frame, merged_mask)
-            for item, obj_mask in mask_entries:
-                clean = self.render_text_on_mask(clean, item.translated, obj_mask, item.style)
-
-            cv2.imwrite(str(Path(output_dir) / frame_path.name), clean)
-            rendered += 1
+            output_frame = self._render_frame(frame, mask_entries)
+            cv2.imwrite(str(Path(output_dir) / frame_path.name), output_frame)
+            if mask_entries:
+                rendered += 1
             self.prev_frame_items = self._snapshot_items(refined_items)
 
         meta = {
             "frames_total": len(frame_paths),
             "frames_rendered": rendered,
-            "mode": "detect_only" if skip_render else "frame_image_only",
+            "mode": "detect_only" if skip_render else "frame_image_smooth",
             "ocr_boxes_total": ocr_boxes_total,
             "boxes_after_filter": kept_boxes_total,
             "json_dir": str(json_dir) if json_dir else None,
-            "use_sam2": self.sam2_predictor is not None,
+            "use_sam2_image": self.sam2_image_predictor is not None,
             "use_lama": self.lama_engine is not None,
         }
         Path(output_dir, "_advanced_meta.json").write_text(
@@ -839,8 +704,7 @@ class AdvancedVideoInplaceTranslator:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Advanced in-place video translation")
-    parser.add_argument("--video", default="", help="Source video path for scene detection/SAM-2")
+    parser = argparse.ArgumentParser(description="Advanced in-place frame translation")
     parser.add_argument("--frames-dir", default="frames_raw", help="Input frames directory")
     parser.add_argument("--output-dir", default="frames_done", help="Output translated frames")
     parser.add_argument("--src-lang", default=ADV_OCR_LANG, help="OCR language for PaddleOCR")
@@ -848,8 +712,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--font-path", default="arial.ttf", help="Font for text rendering")
     parser.add_argument("--sam2-checkpoint", default="", help="SAM-2 checkpoint path")
     parser.add_argument("--sam2-config", default="", help="SAM-2 model config path")
-    parser.add_argument("--use-sam2", action="store_true", default=ADV_USE_SAM2, help="Enable SAM-2 propagation")
-    parser.add_argument("--no-sam2", action="store_false", dest="use_sam2", help="Disable SAM-2 propagation")
+    parser.add_argument("--use-sam2", action="store_true", default=ADV_USE_SAM2, help="Enable SAM-2 image mask refinement")
+    parser.add_argument("--no-sam2", action="store_false", dest="use_sam2", help="Disable SAM-2 image mask refinement")
     parser.add_argument("--use-lama", action="store_true", help="Enable LaMa inpainting")
     parser.add_argument("--json-dir", default="json_cache", help="Directory to save per-frame JSON (default: json_cache)")
     parser.add_argument("--skip-render", action="store_true", help="Only detect+translate+save JSON, skip image rendering")
@@ -870,7 +734,6 @@ def main() -> None:
     )
 
     meta = engine.process(
-        video_path=args.video or None,
         frames_dir=args.frames_dir,
         output_dir=args.output_dir,
         json_dir=args.json_dir or None,
