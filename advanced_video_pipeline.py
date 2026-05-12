@@ -582,9 +582,12 @@ class AdvancedVideoInplaceTranslator:
         frame_dir = Path(frames_dir)
         paths: List[Path] = []
         for suffix in ("*.jpg", "*.jpeg", "*.png"):
-            paths.extend(frame_dir.glob(suffix))
-            paths.extend(frame_dir.glob(suffix.upper()))
-        return sorted(set(paths), key=lambda p: p.name)
+            paths.extend(frame_dir.rglob(suffix))
+            paths.extend(frame_dir.rglob(suffix.upper()))
+        return sorted(
+            {p for p in paths if p.is_file()},
+            key=lambda p: p.relative_to(frame_dir).as_posix(),
+        )
 
     def _prepare_frame_items(
         self,
@@ -655,9 +658,13 @@ class AdvancedVideoInplaceTranslator:
         json_dir: Optional[str] = None,
         skip_render: bool = False,
     ) -> Dict[str, Any]:
+        frame_root = Path(frames_dir)
         frame_paths = self._collect_frame_paths(frames_dir)
         if not frame_paths:
-            raise ValueError(f"No frames found in {frames_dir}")
+            raise ValueError(
+                f"No frames found in {frames_dir}. Put .jpg/.jpeg/.png files under this directory "
+                "or pass --frames-dir to the extracted frame folder."
+            )
 
         os.makedirs(output_dir, exist_ok=True)
         if json_dir:
@@ -667,6 +674,7 @@ class AdvancedVideoInplaceTranslator:
         ocr_boxes_total = 0
         kept_boxes_total = 0
         for frame_path in frame_paths:
+            rel_frame_path = frame_path.relative_to(frame_root)
             frame = cv2.imread(str(frame_path))
             if frame is None:
                 continue
@@ -685,7 +693,8 @@ class AdvancedVideoInplaceTranslator:
 
             # --- Lưu JSON sau khi detect + refine + dịch xong ---
             if json_dir and refined_items:
-                json_path = Path(json_dir) / (frame_path.stem + ".json")
+                json_path = Path(json_dir) / rel_frame_path.with_suffix(".json")
+                json_path.parent.mkdir(parents=True, exist_ok=True)
                 self._save_json(json_path, refined_items)
 
             if skip_render:
@@ -700,7 +709,9 @@ class AdvancedVideoInplaceTranslator:
                 mask_entries.append((item, obj_mask))
 
             output_frame = self._render_frame(frame, mask_entries)
-            cv2.imwrite(str(Path(output_dir) / frame_path.name), output_frame)
+            output_path = Path(output_dir) / rel_frame_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(output_path), output_frame)
             if mask_entries:
                 rendered += 1
             self.prev_frame_items = self._snapshot_items(refined_items)
