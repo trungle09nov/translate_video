@@ -16,10 +16,11 @@ import os
 import shutil
 import argparse
 from pathlib import Path
+from pipeline_config import SUBTITLE_FONT_NAME
 
 # ── Config ────────────────────────────────────────────────────────────────────
-FFMPEG  = r"D:\repo\translate_video\FFmpeg\bin\ffmpeg.exe"
-FFPROBE = r"D:\repo\translate_video\FFmpeg\bin\ffprobe.exe"
+FFMPEG  = "FFmpeg/bin/ffmpeg.exe"
+FFPROBE = "FFmpeg/bin/ffprobe.exe"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -131,7 +132,13 @@ def assemble(video_path: str, audio_path: str, subtitle_path: str, output_path: 
     if use_ass:
         vf = f"ass={tmp_sub}"
     else:
-        style = "force_style='FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Shadow=1'"
+        style = (
+            "force_style='"
+            f"FontName={SUBTITLE_FONT_NAME},"
+            "FontSize=24,PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,Outline=2,Shadow=1"
+            "'"
+        )
         vf = f"subtitles={tmp_sub}:{style}"
 
     # Determine audio/video length relationship

@@ -9,7 +9,10 @@ from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 import shutil
 import math
+from pathlib import Path
+from font_utils import resolve_font_path
 from pipeline_config import (
+    FONT_PATH as CONFIG_FONT_PATH,
     LINE_Y_THRESHOLD,
     LINE_X_GAP_THRESHOLD,
     TEXT_STROKE_WIDTH,
@@ -22,11 +25,13 @@ from pipeline_config import (
 RAW_DIR = "./frames_raw"         # Frames gốc
 JSON_DIR = "./json_cache"        # JSON đã dịch
 OUTPUT_DIR = "./frames_done"     # Frames output
-FONT_PATH = "arial.ttf"
+FONT_PATH = resolve_font_path(CONFIG_FONT_PATH) or CONFIG_FONT_PATH
 RENDER_THREADS = 8               # Threads per GPU
 NUM_GPUS = 2                     # Số GPU
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
 # ================= HÀM VẼ =================
 def normalize_box(box, width, height):
@@ -180,23 +185,24 @@ def wrap_text_by_width(draw, text, font, max_width):
 def get_optimal_font_and_lines(draw, text, font_path, box_width, box_height, padding=4):
     max_size = min(int(box_height), 120)
     min_size = 10
-    
-    if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    resolved_font_path = resolve_font_path(font_path)
     
     safe_width = box_width - (padding * 2)
     safe_height = box_height - (padding * 2)
     spacing = 4
     default_font = ImageFont.load_default()
+    fallback_font = None
 
     for size in range(max_size, min_size, -2):
         if size <= 0: 
             break
-        try:
-            font = ImageFont.truetype(font_path, size)
-        except:
-            font = default_font
+        if not resolved_font_path:
             break
+        try:
+            font = ImageFont.truetype(resolved_font_path, size)
+        except:
+            continue
+        fallback_font = font
         
         lines = wrap_text_by_width(draw, text, font, safe_width)
         bbox_sample = draw.textbbox((0, 0), "Ay", font=font)
@@ -206,10 +212,13 @@ def get_optimal_font_and_lines(draw, text, font_path, box_width, box_height, pad
         if total_text_height <= safe_height:
             return font, lines, total_text_height, line_height
 
-    try: 
-        font = ImageFont.truetype(font_path, min_size)
-    except: 
-        font = default_font
+    if fallback_font is not None:
+        font = fallback_font
+    else:
+        try: 
+            font = ImageFont.truetype(resolved_font_path, min_size) if resolved_font_path else default_font
+        except: 
+            font = default_font
     
     lines = wrap_text_by_width(draw, text, font, safe_width)
     return font, lines, safe_height, 12
@@ -351,7 +360,7 @@ def render_image_worker(task):
             render_items.append((translated_text, box, color))
 
         if len(render_items) == 0:
-            shutil.copy(img_path, out_path)
+            copy_file_atomic(img_path, out_path)
             return True
 
         # Xóa chữ cũ bằng inpainting để giữ kết cấu nền tự nhiên
@@ -397,6 +406,32 @@ def gpu_worker(gpu_id, tasks):
     return success_count
 
 
+def collect_render_tasks(raw_dir=RAW_DIR, json_dir=JSON_DIR, output_dir=OUTPUT_DIR):
+    raw_root = Path(raw_dir)
+    json_root = Path(json_dir)
+    output_root = Path(output_dir)
+    tasks = []
+
+    if not raw_root.exists():
+        return tasks
+
+    image_paths = (
+        p
+        for p in raw_root.rglob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+    )
+    for img_path in sorted(image_paths, key=lambda p: p.relative_to(raw_root).as_posix()):
+        rel_path = img_path.relative_to(raw_root)
+        json_path = json_root / rel_path.with_suffix(".json")
+        out_path = output_root / rel_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not out_path.exists():
+            tasks.append((str(img_path), str(json_path), str(out_path)))
+
+    return tasks
+
+
 # ================= MAIN =================
 def main():
     print("=" * 70)
@@ -411,27 +446,8 @@ def main():
     print("=" * 70)
     
     # Collect tasks
-    tasks = []
-    
-    for root, dirs, files in os.walk(RAW_DIR):
-        for f in files:
-            if f.lower().endswith(('.jpg', '.png', '.jpeg')):
-                img_path = os.path.join(root, f)
-                
-                # JSON path
-                rel_path = os.path.relpath(img_path, RAW_DIR)
-                rel_dir = os.path.dirname(rel_path)
-                json_name = f.replace('.jpg', '.json').replace('.png', '.json').replace('.jpeg', '.json')
-                json_path = os.path.join(JSON_DIR, rel_dir, json_name)
-                
-                # Output path
-                out_path = os.path.join(OUTPUT_DIR, rel_path)
-                out_dir = os.path.dirname(out_path)
-                os.makedirs(out_dir, exist_ok=True)
-                
-                # Chỉ render nếu chưa có output
-                if not os.path.exists(out_path):
-                    tasks.append((img_path, json_path, out_path))
+    tasks = collect_render_tasks()
+
     
     total = len(tasks)
     

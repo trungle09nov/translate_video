@@ -24,8 +24,8 @@ from pathlib import Path
 from llm_translate import translate_entries
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SRT_INPUT  = "data_translate/transcript/sageactive_2.mp3_eng.srt"
-SRT_OUTPUT = "data_translate/transcript/sageactive_2.mp3_vi.srt"
+SRT_INPUT  = "data_translate/transcript/Townhall_Meeting_eng.srt"
+SRT_OUTPUT = "data_translate/transcript/Townhall_Meeting_vi.srt"
 BATCH_SIZE = 20    # entries per API call
 
 

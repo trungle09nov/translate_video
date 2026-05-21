@@ -23,13 +23,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from font_utils import resolve_font_path
 from pipeline_config import (
     ADV_OCR_LANG,
     ADV_OCR_SCORE_THRESHOLD,
     ADV_RENDER_PADDING_PX,
+    ADV_TARGET_LANG,
     ADV_TEXT_OVERFLOW_RATIO,
     ADV_USE_LAMA,
     ADV_USE_SAM2,
+    FONT_PATH,
 )
 
 
@@ -55,7 +58,7 @@ class AdvancedVideoInplaceTranslator:
     ):
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
-        self.font_path = font_path
+        self.font_path = resolve_font_path(font_path) or resolve_font_path(FONT_PATH) or font_path
         self.sam2_checkpoint = sam2_checkpoint
         self.sam2_cfg = sam2_cfg
         self.use_sam2 = use_sam2
@@ -101,7 +104,11 @@ class AdvancedVideoInplaceTranslator:
         try:
             from llm_translate import translate_batch
 
-            return translate_batch
+            return lambda texts: translate_batch(
+                texts,
+                source_lang=self.src_lang,
+                target_lang=self.tgt_lang,
+            )
         except Exception as exc:
             print(f"[WARN] LLM translator unavailable, falling back to GoogleTranslator: {exc}")
             try:
@@ -502,11 +509,13 @@ class AdvancedVideoInplaceTranslator:
         max_lines: int = 3,
     ) -> Tuple[ImageFont.FreeTypeFont, List[str]]:
         max_size = min(64, max(14, box_h))
+        fallback_font: Optional[ImageFont.FreeTypeFont] = None
         for size in range(max_size, 8, -2):
             try:
                 font = ImageFont.truetype(self.font_path, size)
             except Exception:
-                font = ImageFont.load_default()
+                continue
+            fallback_font = font
 
             lines = self.wrap_text_by_width(draw, text, font, max(1, box_w - (ADV_RENDER_PADDING_PX * 2)))
             if len(lines) > max_lines:
@@ -517,6 +526,14 @@ class AdvancedVideoInplaceTranslator:
             total_h = len(lines) * line_h + max(0, len(lines) - 1) * line_spacing
             if total_h <= box_h:
                 return font, lines
+
+        if fallback_font is not None:
+            return fallback_font, self.wrap_text_by_width(
+                draw,
+                text,
+                fallback_font,
+                max(1, box_w - (ADV_RENDER_PADDING_PX * 2)),
+            )
 
         return ImageFont.load_default(), [text]
 
@@ -737,8 +754,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frames-dir", default="frames_raw", help="Input frames directory")
     parser.add_argument("--output-dir", default="frames_done", help="Output translated frames")
     parser.add_argument("--src-lang", default=ADV_OCR_LANG, help="OCR language for PaddleOCR")
-    parser.add_argument("--tgt-lang", default="vi", help="Target language")
-    parser.add_argument("--font-path", default="arial.ttf", help="Font for text rendering")
+    parser.add_argument("--tgt-lang", default=ADV_TARGET_LANG, help="Target language")
+    parser.add_argument("--font-path", default=FONT_PATH, help="Font for text rendering")
     parser.add_argument("--sam2-checkpoint", default="", help="SAM-2 checkpoint path")
     parser.add_argument("--sam2-config", default="", help="SAM-2 model config path")
     parser.add_argument("--use-sam2", action="store_true", default=ADV_USE_SAM2, help="Enable SAM-2 image mask refinement")

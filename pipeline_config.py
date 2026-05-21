@@ -10,6 +10,21 @@ INPAINT_EXPAND = 3
 LONG_TEXT_MIN_CHARS = 24
 LONG_TEXT_EXPAND_PX = 10
 
+# Font used when adding translated text back into frames.
+# On Linux servers, install a Unicode font that supports Vietnamese, for example:
+#   sudo apt-get install fonts-dejavu fonts-noto-core
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+FONT_FALLBACK_PATHS = [
+    FONT_PATH,
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/calibri.ttf",
+]
+SUBTITLE_FONT_NAME = "DejaVu Sans"
+
 # Frame extraction / assembly behavior.
 # Use "source" to extract at original FPS, or set numeric value like 1.
 EXTRACT_FPS = 5
@@ -24,6 +39,7 @@ ASSEMBLE_OUTPUT_FPS_MODE = "auto"
 ADV_SCENE_THRESHOLD = 27.0
 ADV_MIN_SCENE_LEN = 12
 ADV_OCR_LANG = "german"
+ADV_TARGET_LANG = "en"
 ADV_OCR_SCORE_THRESHOLD = 0.25
 ADV_MASK_EXPAND_PX = 3
 ADV_RENDER_PADDING_PX = 4

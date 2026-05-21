@@ -38,8 +38,7 @@ python advanced_video_pipeline.py \
 	--frames-dir frames_raw/video_name \
 	--output-dir frames_done/video_name \
 	--src-lang german \
-	--tgt-lang vi \
-	--font-path arial.ttf
+	--tgt-lang en
 ```
 
 ### 3) Run (full mode with SAM-2 + LaMa)
@@ -49,8 +48,7 @@ python advanced_video_pipeline.py \
 	--frames-dir frames_raw/video_name \
 	--output-dir frames_done/video_name \
 	--src-lang german \
-	--tgt-lang vi \
-	--font-path arial.ttf \
+	--tgt-lang en \
 	--use-sam2 \
 	--sam2-checkpoint /path/to/sam2_checkpoint.pt \
 	--sam2-config /path/to/sam2_config.yaml \

@@ -1,0 +1,17 @@
+pymupdf
+google-generativeai
+pillow
+pandas
+deep-translator
+paddlepaddle
+paddleocr
+pycountry
+elevenlabs
+
+
+whisperx
+git+https://github.com/myshell-ai/OpenVoice.git
+torch
+torchaudio
+pydub
+pyannote.audio
