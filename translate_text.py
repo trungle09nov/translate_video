@@ -1,7 +1,5 @@
 import os
 import json
-import torch
-from transformers import MarianMTModel, MarianTokenizer
 from tqdm import tqdm
 import time
 import re
@@ -19,63 +17,50 @@ NUM_BEAMS = 4
 CACHE_DIR = "./model_cache"  # Hoặc bất kỳ folder nào bạn có quyền
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# ================= INIT TRANSLATOR (không cần HF login) =================
-print(f"\n🔄 Loading MarianMT model: opus-mt-{LANG_SOURCE}-{LANG_TARGET}...")
-print(f"📁 Cache directory: {CACHE_DIR}")
-model_name = f'Helsinki-NLP/opus-mt-{LANG_SOURCE}-{LANG_TARGET}'
+TRANSLATION_BACKEND = "none"
+TRANSLATION_DEVICE = "vllm_api"
+llm_translate_batch = None
 
-try:
-    tokenizer = MarianTokenizer.from_pretrained(
-        model_name,
-        cache_dir=CACHE_DIR  # ✅ Dùng cache folder riêng
-    )
-    model = MarianMTModel.from_pretrained(
-        model_name,
-        cache_dir=CACHE_DIR  # ✅ Dùng cache folder riêng
-    )
-    
-    if torch.cuda.is_available():
-        model = model.cuda()
-        print(f"✅ Model loaded on GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        print("✅ Model loaded on CPU")
-    
-    model.eval()
-    
-except Exception as e:
-    print(f"❌ Failed to load model: {e}")
+
+def init_translator_backend():
+    global llm_translate_batch
+    global TRANSLATION_BACKEND, TRANSLATION_DEVICE
+
+    print(f"\n🔄 Loading translator for {LANG_SOURCE}->{LANG_TARGET}...")
+    print(f"📁 Cache directory: {CACHE_DIR}")
+
+    # Chỉ dùng LLM translator nội bộ của project.
+    try:
+        from llm_translate import translate_batch as _llm_translate_batch
+
+        llm_translate_batch = _llm_translate_batch
+        TRANSLATION_BACKEND = "llm"
+        TRANSLATION_DEVICE = "vllm_api"
+        print("✅ Translator backend: LLM (llm_translate.py)")
+        return
+    except Exception as e:
+        print(f"❌ LLM backend unavailable: {e}")
+
     print("\nTroubleshooting:")
-    print("1. Check internet connection")
-    print("2. Try: pip install --upgrade transformers tokenizers")
-    print(f"3. Check if you have write permission to: {CACHE_DIR}")
-    exit(1)
+    print("1. Check VLLM_URL / VLLM_MODEL / VLLM_API_KEY env vars")
+    print("2. Ensure vLLM OpenAI-compatible API is running")
+    print("3. Test endpoint by importing llm_translate.translate_batch")
+    raise RuntimeError("LLM translator backend is required but unavailable")
 
 # ================= TRANSLATION FUNCTION =================
 def translate_batch_marian(texts, max_length=512, num_beams=4):
-    """Dịch batch với MarianMT"""
+    """Dịch batch bằng LLM backend (giữ tên hàm để tương thích code cũ)."""
     if not texts:
         return []
-    
-    inputs = tokenizer(
-        texts, 
-        return_tensors="pt", 
-        padding=True, 
-        truncation=True, 
-        max_length=max_length
-    )
-    
-    if torch.cuda.is_available():
-        inputs = {k: v.cuda() for k, v in inputs.items()}
-    
-    with torch.no_grad():
-        translated = model.generate(
-            **inputs,
-            max_length=max_length,
-            num_beams=num_beams,
-            early_stopping=True,
+
+    if TRANSLATION_BACKEND == "llm":
+        return llm_translate_batch(
+            texts,
+            source_lang=LANG_SOURCE,
+            target_lang=LANG_TARGET,
         )
-    
-    return [tokenizer.decode(t, skip_special_tokens=True) for t in translated]
+
+    raise RuntimeError("LLM translator backend is not initialized")
 
 
 def clean_text(text):
@@ -278,17 +263,19 @@ def translate_logic():
 
 # ================= MAIN =================
 def main():
+    init_translator_backend()
+
     print("=" * 70)
-    print("🔄 RE-TRANSLATE JSON FILES WITH MarianMT")
+    print("🔄 RE-TRANSLATE JSON FILES")
     print("=" * 70)
     print(f"Directory: {JSON_DIR}")
-    print(f"Model: {model_name}")
+    print(f"Backend: {TRANSLATION_BACKEND}")
     print(f"Cache: {CACHE_DIR}")
     print(f"Batch size: {TRANSLATE_BATCH_SIZE}")
     print(f"Beam size: {NUM_BEAMS}")
     print(f"Line merge y-threshold: {LINE_Y_THRESHOLD}")
     print(f"Line merge x-gap threshold: {LINE_X_GAP_THRESHOLD}")
-    print(f"Device: {'GPU' if torch.cuda.is_available() else 'CPU'}")
+    print(f"Device: {TRANSLATION_DEVICE}")
     print("=" * 70)
     
     start_time = time.time()
