@@ -3,6 +3,7 @@ import json
 import math
 import time
 import gc
+import traceback
 from multiprocessing import Process, set_start_method
 
 # ================= CẤU HÌNH PHẦN CỨNG =================
@@ -48,6 +49,59 @@ def worker_ocr_only(gpu_id, image_files):
     
     debug_dir = os.path.join(JSON_DIR, f"debug_gpu_{gpu_id}")
     os.makedirs(debug_dir, exist_ok=True)
+
+    def parse_ocr_result(result):
+        """Normalize PaddleOCR output into a list of OCR items."""
+        ocr_data = []
+        if not result:
+            return ocr_data
+
+        lines = result[0] if isinstance(result, list) and len(result) > 0 else result
+        if not lines:
+            return ocr_data
+
+        for line in lines:
+            try:
+                box_coords = line[0]
+                content = line[1]
+                text = content[0]
+                score = float(content[1])
+
+                if score < OCR_SCORE_THRESHOLD or not str(text).strip():
+                    continue
+
+                xs = [pt[0] for pt in box_coords]
+                ys = [pt[1] for pt in box_coords]
+
+                ocr_data.append({
+                    "box": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
+                    "text": str(text),
+                    "confidence": score,
+                    "translated": "",
+                })
+            except Exception:
+                continue
+
+        return ocr_data
+
+    def run_ocr(img_path):
+        """Try predict() first, then fallback to ocr()."""
+        last_error = None
+        if hasattr(ocr_engine, "predict"):
+            try:
+                return ocr_engine.predict(img_path)
+            except Exception as exc:
+                last_error = exc
+
+        if hasattr(ocr_engine, "ocr"):
+            try:
+                return ocr_engine.ocr(img_path, cls=False)
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("PaddleOCR engine has no predict() or ocr() method")
     
     for i in range(0, total_files, BATCH_SIZE_OCR):
         batch_items = image_files[i : i + BATCH_SIZE_OCR]
@@ -75,89 +129,26 @@ def worker_ocr_only(gpu_id, image_files):
             ocr_data = []
             
             try:
-                # ✅ Dùng predict() từng ảnh
-                result = ocr_engine.predict(img_path)
-                
-                if not result or not isinstance(result, list) or len(result) == 0:
-                    batch_ocr_results.append((json_out_path, fname, img_path, []))
-                    empty_ocr_count += 1
-                    continue
+                # Dùng predict() / ocr() trực tiếp, rồi parse output theo format chuẩn.
+                result = run_ocr(img_path)
+                ocr_data = parse_ocr_result(result)
 
-                # Parse OCR result
-                try:
-                    # Method 1: save_to_json
-                    result[0].save_to_json(debug_dir)
-                    
-                    json_filename = fname.replace('.jpg', '_res.json').replace('.png', '_res.json').replace('.jpeg', '_res.json')
-                    result_json_path = os.path.join(debug_dir, json_filename)
-                    
-                    if os.path.exists(result_json_path):
-                        with open(result_json_path, 'r', encoding='utf-8') as f:
-                            parsed_data = json.load(f)
-                        
-                        rec_texts = parsed_data.get('rec_texts', [])
-                        rec_scores = parsed_data.get('rec_scores', [])
-                        rec_boxes = parsed_data.get('rec_boxes', [])
-                        
-                        for j in range(len(rec_texts)):
-                            text = rec_texts[j]
-                            score = float(rec_scores[j])
-                            box = rec_boxes[j]
-                            
-                            if not text or not str(text).strip() or score < OCR_SCORE_THRESHOLD:
-                                continue
-                            
-                            ocr_data.append({
-                                "box": [int(box[0]), int(box[1]), int(box[2]), int(box[3])],
-                                "text": str(text),
-                                "confidence": float(score),
-                                "translated": ""
-                            })
-                        
-                        # Clean up debug file
-                        try:
-                            os.remove(result_json_path)
-                        except:
-                            pass
-                    else:
-                        raise Exception("Debug JSON not found")
-                        
-                except Exception as e:
-                    # Method 2: Fallback - parse trực tiếp
-                    if result[0] is not None:
-                        for line in result[0]:
-                            try:
-                                box_coords = line[0]
-                                content = line[1]
-                                
-                                text = content[0]
-                                score = content[1]
-                                
-                                if score < OCR_SCORE_THRESHOLD or not str(text).strip():
-                                    continue
-                                
-                                xs = [pt[0] for pt in box_coords]
-                                ys = [pt[1] for pt in box_coords]
-                                
-                                ocr_data.append({
-                                    "box": [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))],
-                                    "text": str(text),
-                                    "confidence": float(score),
-                                    "translated": ""
-                                })
-                            except:
-                                continue
-                
-                # Store result
                 if len(ocr_data) == 0:
                     empty_ocr_count += 1
-                else:
-                    success_count += 1
+                    batch_ocr_results.append((json_out_path, fname, img_path, []))
+                    continue
+                
+                # Store result
+                success_count += 1
                     
                 batch_ocr_results.append((json_out_path, fname, img_path, ocr_data))
 
             except Exception as e:
                 error_count += 1
+                print(f"   ❌ [GPU {gpu_id}] OCR failed: {os.path.basename(img_path)}")
+                print(f"      {type(e).__name__}: {e}")
+                tb = traceback.format_exc(limit=2)
+                print("      " + "\n      ".join(tb.strip().splitlines()[-2:]))
                 batch_ocr_results.append((json_out_path, fname, img_path, []))
         
         # ==========================================================
