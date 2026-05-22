@@ -1,6 +1,8 @@
 import os
 import json
 import gc
+import re
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Process
 import cv2
@@ -32,6 +34,9 @@ NUM_GPUS = 2                     # Số GPU
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+STABILITY_CONFIDENCE_THRESHOLD = 0.40
+STABILITY_BOX_DISTANCE = 24
+STABILITY_TEXT_RATIO = 0.78
 
 # ================= HÀM VẼ =================
 def normalize_box(box, width, height):
@@ -289,8 +294,82 @@ def copy_file_atomic(src_path, out_path):
     os.replace(temp_path, out_path)
 
 
+def normalize_render_text(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+
+
+def box_distance(box_a, box_b):
+    return sum(abs(int(a) - int(b)) for a, b in zip(box_a, box_b))
+
+
+def stabilize_items(current_items, previous_items):
+    if not previous_items:
+        return current_items
+
+    stabilized = []
+    for item in current_items:
+        current_box = item.get("box")
+        if not current_box:
+            stabilized.append(item)
+            continue
+
+        current_text = normalize_render_text(item.get("translated") or item.get("text"))
+        current_conf = float(item.get("confidence", 1.0) or 0.0)
+
+        best_prev = None
+        best_score = None
+        for prev in previous_items:
+            prev_box = prev.get("box")
+            if not prev_box:
+                continue
+
+            prev_text = normalize_render_text(prev.get("translated") or prev.get("text"))
+            if not prev_text or not current_text:
+                continue
+
+            text_ratio = SequenceMatcher(None, current_text, prev_text).ratio()
+            if text_ratio < STABILITY_TEXT_RATIO:
+                continue
+
+            dist = box_distance(current_box, prev_box)
+            if dist > STABILITY_BOX_DISTANCE:
+                continue
+
+            score = (1.0 - text_ratio) * 100.0 + dist
+            if best_score is None or score < best_score:
+                best_prev = prev
+                best_score = score
+
+        if best_prev is not None:
+            prev_box = list(best_prev["box"])
+            if current_conf < STABILITY_CONFIDENCE_THRESHOLD:
+                item["box"] = prev_box
+                prev_translated = best_prev.get("translated") or best_prev.get("text") or ""
+                if prev_translated:
+                    item["translated"] = prev_translated
+                    item["text"] = best_prev.get("text", item.get("text", ""))
+            else:
+                item["box"] = [int(round((a + b) / 2)) for a, b in zip(current_box, prev_box)]
+
+        stabilized.append(item)
+
+    return stabilized
+
+
+def snapshot_items(items):
+    return [
+        {
+            "text": item.get("text", ""),
+            "translated": item.get("translated", ""),
+            "box": list(item.get("box", [])),
+            "confidence": float(item.get("confidence", 1.0) or 0.0),
+        }
+        for item in items
+    ]
+
+
 # ================= RENDER WORKER =================
-def render_image_worker(task):
+def render_image_worker(task, previous_items=None):
     """Render 1 ảnh từ JSON"""
     img_path, json_path, out_path = task
     
@@ -310,7 +389,7 @@ def render_image_worker(task):
         # Không có text → copy ảnh gốc
         if len(ocr_data) == 0:
             copy_file_atomic(img_path, out_path)
-            return True
+            return True, previous_items or []
         
         # Load ảnh bằng OpenCV để xử lý inpainting nền
         cv2_img = cv2.imread(img_path, cv2.IMREAD_COLOR)
@@ -336,9 +415,13 @@ def render_image_worker(task):
                 continue
 
             raw_items.append({
+                "text": item.get("text", "").strip(),
                 "translated": translated,
                 "box": list(normalized_box),
+                "confidence": float(item.get("confidence", 1.0) or 0.0),
             })
+
+        raw_items = stabilize_items(raw_items, previous_items or [])
 
         # Gộp word-level boxes thành line-level boxes
         merged_items = merge_boxes_on_line(
@@ -377,11 +460,11 @@ def render_image_worker(task):
 
         # Save
         save_image_atomic(img_pil, out_path, quality=95)
-        return True
+        return True, snapshot_items(merged_items)
         
     except Exception as e:
         print(f"\n❌ Error rendering {os.path.basename(img_path)}: {e}")
-        return False
+        return False, previous_items or []
 
 
 # ================= WORKER PROCESS PER GPU =================
@@ -393,14 +476,12 @@ def gpu_worker(gpu_id, tasks):
     print(f"🚀 GPU Worker {gpu_id} started with {len(tasks)} tasks")
     
     success_count = 0
-    
-    # Render với threads
-    with ThreadPoolExecutor(max_workers=RENDER_THREADS) as executor:
-        futures = {executor.submit(render_image_worker, task): task for task in tasks}
-        
-        for future in as_completed(futures):
-            if future.result():
-                success_count += 1
+
+    previous_items = []
+    for task in tasks:
+        ok, previous_items = render_image_worker(task, previous_items)
+        if ok:
+            success_count += 1
     
     print(f"✅ GPU Worker {gpu_id} completed: {success_count}/{len(tasks)}")
     return success_count
@@ -458,9 +539,6 @@ def main():
     print(f"📦 Found {total} images to render\n")
     
     # Chia tasks cho mỗi GPU
-    import random
-    random.shuffle(tasks)  # Shuffle để load balance tốt hơn
-    
     chunk_size = math.ceil(total / NUM_GPUS)
     task_chunks = [tasks[i:i + chunk_size] for i in range(0, total, chunk_size)]
     

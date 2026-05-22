@@ -8,6 +8,7 @@ from multiprocessing import Process, set_start_method
 # ================= CẤU HÌNH PHẦN CỨNG =================
 NUM_GPUS = 2
 BATCH_SIZE_OCR = 32  # Giảm lại để ổn định
+OCR_SCORE_THRESHOLD = 0.35
 
 # ================= CẤU HÌNH THƯ MỤC =================
 RAW_DIR = "./frames_raw"         
@@ -103,7 +104,7 @@ def worker_ocr_only(gpu_id, image_files):
                             score = float(rec_scores[j])
                             box = rec_boxes[j]
                             
-                            if not text or not str(text).strip() or score < 0.25:
+                            if not text or not str(text).strip() or score < OCR_SCORE_THRESHOLD:
                                 continue
                             
                             ocr_data.append({
@@ -132,7 +133,7 @@ def worker_ocr_only(gpu_id, image_files):
                                 text = content[0]
                                 score = content[1]
                                 
-                                if score < 0.25 or not str(text).strip():
+                                if score < OCR_SCORE_THRESHOLD or not str(text).strip():
                                     continue
                                 
                                 xs = [pt[0] for pt in box_coords]

@@ -55,7 +55,7 @@ def _call_llm(prompt: str, source_lang: str, target_lang: str) -> str:
         "temperature": 0.3,
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [
-            {"role": "system", "content": _system_prompt(source_lang, target_lang)},
+            {"role": "system", "content": _system_prompt(source_lang, target_lang) + "/no_think"},
             {"role": "user", "content": prompt + "/no_think"},
         ],
     }

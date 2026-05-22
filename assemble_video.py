@@ -4,6 +4,7 @@ import json
 from pipeline_config import ASSEMBLE_OUTPUT_FPS_MODE
 
 FRAMES_ROOT = "./frames_done"      # Frames đã dịch
+RAW_FRAMES_ROOT = "./frames_raw"   # Frames gốc (chứa _extract_meta.json từ bước extract)
 VIDEO_ROOT = "./data"              # Video gốc (có audio)
 OUTPUT_ROOT = "./video_output"     # Video output
 
@@ -71,6 +72,16 @@ def get_extract_meta(frames_dir):
         return None
 
 
+def infer_extract_fps_fraction(num_frames, duration_sec):
+    """Suy ra FPS tách frame từ số frame và duration video gốc (khi thiếu meta)."""
+    if duration_sec <= 0 or num_frames <= 0:
+        return None
+    inferred = num_frames / duration_sec
+    if inferred <= 0:
+        return None
+    return f"{inferred:.6f}"
+
+
 def choose_output_fps(source_fps_fraction, extract_fps_fraction):
     mode = ASSEMBLE_OUTPUT_FPS_MODE
     if mode == "source":
@@ -91,6 +102,7 @@ def choose_output_fps(source_fps_fraction, extract_fps_fraction):
 
 def assemble_video_for_folder(subdir):
     frames_dir = os.path.join(FRAMES_ROOT, subdir)
+    raw_frames_dir = os.path.join(RAW_FRAMES_ROOT, subdir)
     video_source = os.path.join(VIDEO_ROOT, f"{subdir}.mp4")
     output_video = os.path.join(OUTPUT_ROOT, f"{subdir}_translated.mp4")
 
@@ -104,18 +116,34 @@ def assemble_video_for_folder(subdir):
 
     # Lấy thông tin video gốc + metadata extract
     fps_fraction = get_video_fps_fraction(video_source)
+    duration = get_video_duration(video_source)
+    num_frames = count_frames_in_dir(frames_dir)
+
     meta = get_extract_meta(frames_dir)
+    meta_source = "frames_done/_extract_meta.json"
+    if not meta:
+        # Bước render không copy _extract_meta.json sang frames_done,
+        # nên fallback đọc trực tiếp từ frames_raw.
+        meta = get_extract_meta(raw_frames_dir)
+        if meta:
+            meta_source = "frames_raw/_extract_meta.json"
+
     extract_fps_fraction = fps_fraction
     if meta:
         extract_fps_fraction = str(meta.get("extract_fps", fps_fraction))
+    else:
+        inferred = infer_extract_fps_fraction(num_frames, duration)
+        if inferred:
+            extract_fps_fraction = inferred
+            meta_source = "inferred_from_frame_count"
+        else:
+            meta_source = "fallback_source_fps"
 
     output_fps_fraction = choose_output_fps(fps_fraction, extract_fps_fraction)
-    duration = get_video_duration(video_source)
-    num_frames = count_frames_in_dir(frames_dir)
     
     print(f"🎬 Ghép video: {subdir}")
     print(f"   FPS gốc: {fps_fraction}")
-    print(f"   FPS tách frame: {extract_fps_fraction}")
+    print(f"   FPS tách frame: {extract_fps_fraction} ({meta_source})")
     print(f"   FPS output: {output_fps_fraction} (mode: {ASSEMBLE_OUTPUT_FPS_MODE})")
     print(f"   Duration: {duration:.2f}s")
     print(f"   Frames: {num_frames}")
