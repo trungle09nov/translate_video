@@ -120,7 +120,7 @@ def assemble_video_for_folder(subdir):
     print(f"   Duration: {duration:.2f}s")
     print(f"   Frames: {num_frames}")
 
-    # ✅ Ghép: frames -> video + audio gốc, đọc frames đúng FPS đã tách
+    # ✅ Ghép: frames -> video + audio gốc, luôn giữ đúng duration của video nguồn.
     cmd = [
         "ffmpeg", "-y",
         "-framerate", extract_fps_fraction,
@@ -135,7 +135,8 @@ def assemble_video_for_folder(subdir):
         "-map", "1:a:0?",                        # Map audio từ video gốc (? = optional)
         "-c:a", "aac",                           # Encode audio
         "-b:a", "192k",                          # Bitrate audio
-        "-shortest",                             # Dừng khi hết frames hoặc audio (tùy cái nào ngắn hơn)
+        "-af", "apad",                           # Nếu audio ngắn hơn thì pad silence để không cắt video
+        "-t", f"{duration:.6f}",                 # Ép output bằng đúng thời lượng video gốc
         output_video
     ]
 
